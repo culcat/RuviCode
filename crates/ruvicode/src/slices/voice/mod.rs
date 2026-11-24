@@ -84,6 +84,127 @@ impl SpeechTranscriber for WhisperCliTranscriber {
     }
 }
 
+/// Cross-platform CLI microphone recorder (`rec` / `sox` / `ffmpeg`) producing 16 kHz mono WAV files.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MicrophoneRecorder;
+
+impl MicrophoneRecorder {
+    fn detect_binary() -> Option<&'static str> {
+        if find_executable("rec").is_some() {
+            Some("rec")
+        } else if find_executable("sox").is_some() {
+            Some("sox")
+        } else if find_executable("ffmpeg").is_some() {
+            Some("ffmpeg")
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` when a supported CLI audio recorder (`rec`, `sox`, or `ffmpeg`) is on `PATH`.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        Self::detect_binary().is_some()
+    }
+
+    /// Platform-specific command hint for installing a supported microphone recorder.
+    #[must_use]
+    pub const fn install_instructions(&self) -> &'static str {
+        if cfg!(target_os = "macos") {
+            "brew install sox  # or: brew install ffmpeg"
+        } else {
+            "sudo apt install sox  # or: sudo apt install ffmpeg"
+        }
+    }
+
+    /// Records `seconds` of 16 kHz mono 16-bit PCM audio into `output_path`.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Config`] if `seconds` is `0`, or [`CoreError::Execution`] if no
+    /// supported recorder binary is available or the recording process fails.
+    pub async fn record_wav(&self, output_path: &Path, seconds: u8) -> CoreResult<()> {
+        self.record_wav_with_binary(Self::detect_binary(), output_path, seconds)
+            .await
+    }
+
+    async fn record_wav_with_binary(
+        &self,
+        binary: Option<&str>,
+        output_path: &Path,
+        seconds: u8,
+    ) -> CoreResult<()> {
+        if seconds == 0 {
+            return Err(CoreError::Config(
+                "recording duration must be at least 1 second".to_string(),
+            ));
+        }
+
+        let Some(bin) = binary else {
+            return Err(CoreError::Execution {
+                component: "mic-recorder".to_string(),
+                message: format!(
+                    "no microphone recorder (`rec`, `sox`, or `ffmpeg`) found; install via `{}`",
+                    self.install_instructions()
+                ),
+            });
+        };
+
+        let secs = seconds.to_string();
+        let path_str = output_path.to_string_lossy().to_string();
+        let mut cmd = Command::new(bin);
+        match bin {
+            "rec" => {
+                cmd.args([
+                    "-q", "-r", "16000", "-c", "1", "-b", "16", &path_str, "trim", "0", &secs,
+                ]);
+            }
+            "sox" => {
+                cmd.args([
+                    "-q", "-d", "-r", "16000", "-c", "1", "-b", "16", &path_str, "trim", "0", &secs,
+                ]);
+            }
+            _ => {
+                let (input_fmt, input_dev) = if cfg!(target_os = "macos") {
+                    ("avfoundation", ":0")
+                } else {
+                    ("pulse", "default")
+                };
+                cmd.args([
+                    "-y",
+                    "-f",
+                    input_fmt,
+                    "-i",
+                    input_dev,
+                    "-t",
+                    &secs,
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    "-sample_fmt",
+                    "s16",
+                    &path_str,
+                ]);
+            }
+        }
+
+        let output = cmd.output().await.map_err(|err| CoreError::Execution {
+            component: "mic-recorder".to_string(),
+            message: err.to_string(),
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CoreError::Execution {
+                component: "mic-recorder".to_string(),
+                message: format!("{bin} failed: {}", stderr.trim()),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 /// Exposes Whisper STT installation & status uniformly in the TUI Local Installer modal.
 pub struct WhisperRuntimeManager;
 
@@ -146,5 +267,37 @@ mod tests {
             .await
             .expect_err("missing audio file must return Io error");
         assert!(matches!(err, CoreError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn mic_recorder_rejects_zero_seconds() {
+        let recorder = MicrophoneRecorder;
+        let err = recorder
+            .record_wav(Path::new("/tmp/ruvi-mic-zero.wav"), 0)
+            .await
+            .expect_err("zero seconds must return Config error");
+        assert!(matches!(err, CoreError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn mic_recorder_handles_missing_binary_gracefully() {
+        let recorder = MicrophoneRecorder;
+        let err = recorder
+            .record_wav_with_binary(None, Path::new("/tmp/ruvi-mic-missing.wav"), 3)
+            .await
+            .expect_err("missing recorder binary must return Execution error");
+        match err {
+            CoreError::Execution { component, message } => {
+                assert_eq!(component, "mic-recorder");
+                assert!(message.contains(recorder.install_instructions()));
+            }
+            other => panic!("expected CoreError::Execution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mic_recorder_exposes_install_instructions() {
+        let recorder = MicrophoneRecorder;
+        assert_ne!(recorder.install_instructions(), "");
     }
 }
