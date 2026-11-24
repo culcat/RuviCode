@@ -30,6 +30,23 @@
 | Live audio capture (`cpal`) -> Whisper STT | `Feature/voice-mic-capture` | `done` | `MicrophoneRecorder` (`rec`/`sox`/`ffmpeg`) + `/mic [seconds]` in TUI |
 | Extism / Component-Model WASM plugin ABI v2 | `Feature/wasm-plugin-abi-v2` | `done` | Linear-memory JSON ABI v2 (`memory`, `ruvi_alloc`, `ruvi_run_json`) alongside ABI v1 |
 
+## Wave 4 — Autonomous Coding Tools, Bot Session Router & Agent Profiles
+
+### Wave 4A — Mode-Aware Workspace Coding Tools (`Feature/workspace-coding-tools`)
+| Unit / Reference | RuviCode Target | State | Notes |
+|---|---|---|---|
+| `packages/core/src/tool/{grep,write,edit,bash}` | `ruvi-core::traits`, `slices/tools/`, `slices/chat/` | `open` | `grep_search`, `write_file`, `edit_file`, `run_command` + `AgentTool::is_read_only()` enforcement in `PLAN` mode |
+
+### Wave 4B — End-to-End Bot Session Router (`Feature/bot-session-router`)
+| Unit / Reference | RuviCode Target | State | Notes |
+|---|---|---|---|
+| RuviCode native Telegram/Discord runtime | `slices/bots/`, `src/main.rs` | `open` | `BotSessionRouter` bridging `EventBus` <-> `execute_agent_loop` <-> `send_reply` + `ruvi bots` CLI daemon |
+
+### Wave 4C — Cross-Harness Agent Profiles (`Feature/agent-profiles`)
+| Unit / Reference | RuviCode Target | State | Notes |
+|---|---|---|---|
+| `packages/core/src/agent.ts` & `.agents/agents` | `ruvi-core::domain`, `slices/harness_compat/`, `slices/tui/` | `open` | Discover `.agents/agents/*.md`, `.claude/agents/*.md`, `.opencode/agent/*.md`, `opencode.json` + `/agents` selector |
+
 ## Using `rust-anything` CLI (Optional)
 If porting specific reference utilities from TypeScript/Python into standalone crates, run:
 ```bash
