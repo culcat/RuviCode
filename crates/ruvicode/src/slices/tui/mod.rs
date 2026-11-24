@@ -434,6 +434,7 @@ impl TuiApp {
             }
             "/clear" => {
                 self.engine.clear_messages();
+                self.active_agent = None;
                 self.scroll_offset = 0;
                 self.status_line = "Cleared session history".to_string();
             }
@@ -752,10 +753,9 @@ impl TuiApp {
             .map(str::trim)
             .filter(|m| !m.is_empty())
         {
-            if let Some((provider, model)) = raw_model
-                .split_once('/')
-                .filter(|(p, m)| !p.is_empty() && !m.is_empty())
-            {
+            if let Some((provider, model)) = raw_model.split_once('/').filter(|(p, m)| {
+                !p.is_empty() && !m.is_empty() && self.registry.provider(p).is_ok()
+            }) {
                 self.engine.select_model(provider, model);
             } else {
                 let current_provider = self.engine.provider_id().to_string();
@@ -1122,5 +1122,8 @@ mod tests {
         assert_eq!(app.engine.mode(), AgentMode::Build);
         assert_eq!(app.engine.provider_id(), "openai");
         assert_eq!(app.engine.model(), "local-coder");
+
+        app.execute_slash_command("/clear");
+        assert_eq!(app.active_agent, None);
     }
 }

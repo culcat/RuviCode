@@ -265,7 +265,11 @@ impl ContextLoader for MultiHarnessContextLoader {
         ctx.rules.sort_by(|a, b| a.name.cmp(&b.name));
         ctx.skills.sort_by(|a, b| a.name.cmp(&b.name));
         ctx.mcp_servers.sort_by(|a, b| a.name.cmp(&b.name));
-        ctx.agents.sort_by(|a, b| a.name.cmp(&b.name));
+        ctx.agents.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.source_harness.cmp(&b.source_harness))
+        });
 
         Ok(ctx)
     }
