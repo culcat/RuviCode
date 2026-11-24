@@ -84,6 +84,28 @@ impl MessageRole {
     }
 }
 
+/// Tool specification sent to an LLM provider that supports function calling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Unique tool name.
+    pub name: String,
+    /// Concise tool description.
+    pub description: String,
+    /// JSON Schema for tool arguments.
+    pub parameters: serde_json::Value,
+}
+
+/// Tool invocation requested by an LLM response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider-assigned call identifier.
+    pub id: String,
+    /// Name of the registered [`crate::AgentTool`] to invoke.
+    pub name: String,
+    /// JSON arguments object.
+    pub arguments: serde_json::Value,
+}
+
 /// Single message inside a session transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -91,6 +113,12 @@ pub struct ChatMessage {
     pub role: MessageRole,
     /// Plain-text or markdown message content.
     pub content: String,
+    /// Optional tool calls requested by an assistant message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Identifier of the originating [`ToolCall`] when `role` is [`MessageRole::Tool`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
@@ -100,12 +128,36 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// Creates an assistant message carrying requested [`ToolCall`] entries.
+    #[must_use]
+    pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// Creates a [`MessageRole::Tool`] response message linked to `tool_call_id`.
+    #[must_use]
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
         }
     }
 }
 
 /// Provider-agnostic completion request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CompletionRequest {
     /// Target model identifier understood by the selected provider.
     pub model: String,
@@ -113,6 +165,22 @@ pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
     /// Current agent mode (`Build` or `Plan`).
     pub mode: AgentMode,
+    /// Callable tool definitions exposed for this request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
+}
+
+impl CompletionRequest {
+    /// Creates a [`CompletionRequest`] with an empty tool list.
+    #[must_use]
+    pub fn new(model: impl Into<String>, messages: Vec<ChatMessage>, mode: AgentMode) -> Self {
+        Self {
+            model: model.into(),
+            messages,
+            mode,
+            tools: Vec::new(),
+        }
+    }
 }
 
 /// Provider-agnostic completion response.
@@ -122,6 +190,9 @@ pub struct CompletionResponse {
     pub model: String,
     /// Assistant reply content.
     pub content: String,
+    /// Optional tool calls requested by the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// Descriptor for a discovered `SKILL.md` package from any compatible harness.

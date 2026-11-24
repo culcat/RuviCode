@@ -229,6 +229,22 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, a
     }
 
     if app.in_flight {
+        if !app.streaming_buffer.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "[ASSISTANT (streaming)]",
+                Style::default()
+                    .fg(rgb(palette.success))
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            for content_line in app.streaming_buffer.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {content_line}"),
+                    Style::default().fg(rgb(palette.text)),
+                )));
+            }
+            lines.push(Line::from(""));
+        }
+
         let frame_icon = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
         lines.push(Line::from(vec![Span::styled(
             format!(

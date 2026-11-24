@@ -10,7 +10,7 @@ pub use bus::{AppEvent, EventBus};
 pub use domain::{
     AgentMode, ChatMessage, CompletionRequest, CompletionResponse, HarnessContext, McpServerConfig,
     MessageRole, PluginManifest, RuleDocument, RuntimeKind, RuntimeStatus, SessionId,
-    SkillDescriptor, ThemePalette,
+    SkillDescriptor, ThemePalette, ToolCall, ToolDefinition,
 };
 pub use error::{CoreError, CoreResult};
 pub use registry::ExtensionRegistry;

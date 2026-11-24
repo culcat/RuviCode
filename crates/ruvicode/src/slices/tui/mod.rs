@@ -8,12 +8,14 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ruvi_core::{
-    AppEvent, ChatMessage, CompletionRequest, CompletionResponse, CoreResult, EventBus,
-    ExtensionRegistry, MessageRole, RuntimeStatus, ThemePalette, UiTheme,
+    AppEvent, ChatMessage, CoreResult, EventBus, ExtensionRegistry, MessageRole, RuntimeStatus,
+    ThemePalette, UiTheme,
 };
 use tokio::sync::mpsc;
 
-use crate::slices::chat::ChatEngine;
+use crate::slices::chat::{
+    AgentLoopConfig, AgentLoopOutcome, ChatEngine, ChatLoopEvent, execute_agent_loop,
+};
 
 /// Built-in slash commands exposed in the Command Palette (`Ctrl+P` / `/help`).
 pub const COMMANDS: &[(&str, &str)] = &[
@@ -66,7 +68,8 @@ pub enum ActiveModal {
 }
 
 enum BgResult {
-    ChatFinished(CoreResult<CompletionResponse>),
+    StreamEvent(ChatLoopEvent),
+    ChatFinished(CoreResult<AgentLoopOutcome>),
     ModelsLoaded(Vec<(String, String)>),
     RuntimesRefreshed(Vec<RuntimeStatus>),
     RuntimeActionFinished {
@@ -104,6 +107,8 @@ pub struct TuiApp {
     pub status_line: String,
     /// Whether an async completion is currently running.
     pub in_flight: bool,
+    /// Live streaming tokens accumulated for the active assistant turn.
+    pub streaming_buffer: String,
     /// Spinner animation frame counter.
     pub spinner_tick: usize,
     /// Exit flag.
@@ -138,6 +143,7 @@ impl TuiApp {
             modal: ActiveModal::None,
             status_line: "Ready".to_string(),
             in_flight: false,
+            streaming_buffer: String::new(),
             spinner_tick: 0,
             should_quit: false,
             bg_tx,
@@ -276,22 +282,33 @@ impl TuiApp {
         self.engine.push_user_message(trimmed);
 
         self.in_flight = true;
+        self.streaming_buffer.clear();
         self.status_line = format!("Running {provider_id}/{model}...");
         let registry = Arc::clone(&self.registry);
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            let res = match registry.provider(&provider_id) {
-                Ok(provider) => {
-                    provider
-                        .complete(CompletionRequest {
-                            model,
-                            messages: request_messages,
-                            mode,
-                        })
-                        .await
+            let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+            let fwd_tx = tx.clone();
+            let fwd = tokio::spawn(async move {
+                while let Some(ev) = ev_rx.recv().await {
+                    if fwd_tx.send(BgResult::StreamEvent(ev)).is_err() {
+                        break;
+                    }
                 }
-                Err(err) => Err(err),
-            };
+            });
+
+            let res = execute_agent_loop(
+                &registry,
+                AgentLoopConfig {
+                    provider_id,
+                    model,
+                    mode,
+                    initial_messages: request_messages,
+                },
+                Some(ev_tx),
+            )
+            .await;
+            let _ = fwd.await;
             let _ = tx.send(BgResult::ChatFinished(res));
         });
     }
@@ -538,13 +555,25 @@ impl TuiApp {
 
     fn handle_bg_result(&mut self, msg: BgResult) {
         match msg {
-            BgResult::ChatFinished(Ok(response)) => {
+            BgResult::StreamEvent(ev) => match ev {
+                ChatLoopEvent::Token(tok) => self.streaming_buffer.push_str(&tok),
+                ChatLoopEvent::ToolStarted { name, .. } => {
+                    self.streaming_buffer.clear();
+                    self.status_line = format!("Executing tool `{name}`...");
+                }
+                ChatLoopEvent::ToolFinished { name, .. } => {
+                    self.status_line = format!("Tool `{name}` finished");
+                }
+            },
+            BgResult::ChatFinished(Ok(outcome)) => {
                 self.in_flight = false;
-                self.engine.push_assistant_message(response.content);
-                self.status_line = format!("Completed via {}", response.model);
+                self.streaming_buffer.clear();
+                self.engine.extend_messages(outcome.generated_messages);
+                self.status_line = format!("Completed via {}", outcome.response.model);
             }
             BgResult::ChatFinished(Err(err)) => {
                 self.in_flight = false;
+                self.streaming_buffer.clear();
                 self.engine
                     .push_system_note(format!("Provider error: {err}"));
                 self.status_line = format!("Error: {err}");

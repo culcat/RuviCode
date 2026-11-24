@@ -30,6 +30,24 @@ pub trait LlmProvider: Send + Sync {
     /// # Errors
     /// Returns [`crate::CoreError::Provider`] or [`crate::CoreError::Config`] on failure.
     async fn complete(&self, request: CompletionRequest) -> CoreResult<CompletionResponse>;
+
+    /// Executes a streaming chat completion request, forwarding text chunks via `token_tx`.
+    ///
+    /// Default implementation delegates to [`LlmProvider::complete`] and emits the full reply once.
+    ///
+    /// # Errors
+    /// Returns [`crate::CoreError::Provider`] or [`crate::CoreError::Config`] on failure.
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        token_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> CoreResult<CompletionResponse> {
+        let response = self.complete(request).await?;
+        if !response.content.is_empty() {
+            let _ = token_tx.send(response.content.clone());
+        }
+        Ok(response)
+    }
 }
 
 /// Callable tool exposed to agents, implemented natively or backed by WASM/MCP plugins.

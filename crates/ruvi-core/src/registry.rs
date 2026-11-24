@@ -223,6 +223,7 @@ mod tests {
             Ok(CompletionResponse {
                 model: request.model,
                 content: self.reply.to_string(),
+                tool_calls: Vec::new(),
             })
         }
     }
@@ -286,11 +287,7 @@ mod tests {
         let first = registry
             .provider("custom")
             .expect("provider should be registered")
-            .complete(CompletionRequest {
-                model: "mock-1".to_string(),
-                messages: vec![],
-                mode: AgentMode::Build,
-            })
+            .complete(CompletionRequest::new("mock-1", vec![], AgentMode::Build))
             .await
             .expect("completion should succeed");
         assert_eq!(first.content, "v1");
@@ -303,11 +300,7 @@ mod tests {
         let second = registry
             .provider("custom")
             .expect("replaced provider should exist")
-            .complete(CompletionRequest {
-                model: "mock-1".to_string(),
-                messages: vec![],
-                mode: AgentMode::Plan,
-            })
+            .complete(CompletionRequest::new("mock-1", vec![], AgentMode::Plan))
             .await
             .expect("completion should succeed");
         assert_eq!(second.content, "v2");
