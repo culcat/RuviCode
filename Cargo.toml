@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/ruvi-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/culcat/RuviCode"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[workspace.dependencies]
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "process", "fs", "time", "signal", "io-util"] }
+uuid = { version = "1.29", features = ["v4", "serde"] }
