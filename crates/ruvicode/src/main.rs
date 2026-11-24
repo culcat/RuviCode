@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use ruvi_core::{AgentMode, EventBus, SessionId};
 use ruvicode::bootstrap::build_registry;
+use ruvicode::slices::bots::start_configured_bots;
 use ruvicode::slices::chat::ChatEngine;
 use ruvicode::slices::providers::detect_initial_provider_and_model;
 use ruvicode::slices::tui::{TuiApp, collect_runtime_statuses, run_tui};
@@ -46,6 +47,15 @@ enum Commands {
         /// Agent mode (`build` or `plan`).
         #[arg(long, value_enum, default_value_t = CliMode::Build)]
         mode: CliMode,
+    },
+    /// Run configured Telegram/Discord bot gateways in headless daemon mode.
+    Bots {
+        /// Override LLM provider ID (e.g. `ollama`, `openai`, `openrouter`, `ruvi-demo`).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Override model identifier.
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 
@@ -101,6 +111,17 @@ async fn main() -> Result<()> {
                 let record = store.load(id).await?;
                 engine.restore_record(record);
             }
+            if let Err(err) = start_configured_bots(
+                Arc::clone(&registry),
+                bus.clone(),
+                engine.build_system_prompt(),
+                engine.provider_id().to_string(),
+                engine.model().to_string(),
+            )
+            .await
+            {
+                tracing::warn!("failed to start configured bot gateways: {err}");
+            }
             let branch = detect_git_branch(&workspace);
             let app = TuiApp::new(
                 workspace.display().to_string(),
@@ -121,21 +142,8 @@ async fn main() -> Result<()> {
             model,
             mode,
         }) => {
-            let (default_provider, default_model) =
-                detect_initial_provider_and_model(&registry).await;
-            let chosen_provider = provider.unwrap_or(default_provider);
-            let chosen_model = match model {
-                Some(m) => m,
-                None if chosen_provider == "ruvi-demo" => "ruvi-demo-v1".to_string(),
-                None => {
-                    let prov = registry.provider(&chosen_provider)?;
-                    prov.list_models()
-                        .await?
-                        .into_iter()
-                        .next()
-                        .unwrap_or(default_model)
-                }
-            };
+            let (chosen_provider, chosen_model) =
+                resolve_provider_and_model(&registry, provider, model).await?;
 
             let mut engine = ChatEngine::new(
                 Arc::clone(&registry),
@@ -148,9 +156,76 @@ async fn main() -> Result<()> {
             let reply = engine.send_user_message(message).await?;
             println!("{}", reply.content);
         }
+        Some(Commands::Bots { provider, model }) => {
+            run_bots_daemon(registry, bus, context, provider, model).await?;
+        }
     }
 
     Ok(())
+}
+
+async fn run_bots_daemon(
+    registry: Arc<ruvi_core::ExtensionRegistry>,
+    bus: EventBus,
+    context: ruvi_core::HarnessContext,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<()> {
+    let (chosen_provider, chosen_model) =
+        resolve_provider_and_model(&registry, provider, model).await?;
+    let engine = ChatEngine::new(
+        Arc::clone(&registry),
+        bus.clone(),
+        context,
+        chosen_provider.clone(),
+        chosen_model.clone(),
+    );
+    let started = start_configured_bots(
+        Arc::clone(&registry),
+        bus,
+        engine.build_system_prompt(),
+        chosen_provider.clone(),
+        chosen_model.clone(),
+    )
+    .await?;
+
+    if started.is_empty() {
+        println!("No bot gateways are configured.");
+        println!("Configure at least one gateway via environment variables:");
+        println!("  Telegram: RUVI_TELEGRAM_BOT_TOKEN (optional: RUVI_TELEGRAM_CHAT_ID)");
+        println!("  Discord:  RUVI_DISCORD_BOT_TOKEN and RUVI_DISCORD_CHANNEL_ID");
+        return Ok(());
+    }
+
+    println!(
+        "RuviCode bots running ({chosen_provider}/{chosen_model}) for gateways: {}",
+        started.join(", ")
+    );
+    println!("Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
+async fn resolve_provider_and_model(
+    registry: &ruvi_core::ExtensionRegistry,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<(String, String)> {
+    let (default_provider, default_model) = detect_initial_provider_and_model(registry).await;
+    let chosen_provider = provider.unwrap_or(default_provider);
+    let chosen_model = match model {
+        Some(m) => m,
+        None if chosen_provider == "ruvi-demo" => "ruvi-demo-v1".to_string(),
+        None => {
+            let prov = registry.provider(&chosen_provider)?;
+            prov.list_models()
+                .await?
+                .into_iter()
+                .next()
+                .unwrap_or(default_model)
+        }
+    };
+    Ok((chosen_provider, chosen_model))
 }
 
 async fn print_doctor_report(

@@ -40,7 +40,7 @@
 ### Wave 4B — End-to-End Bot Session Router (`Feature/bot-session-router`)
 | Unit / Reference | RuviCode Target | State | Notes |
 |---|---|---|---|
-| RuviCode native Telegram/Discord runtime | `slices/bots/`, `src/main.rs` | `open` | `BotSessionRouter` bridging `EventBus` <-> `execute_agent_loop` <-> `send_reply` + `ruvi bots` CLI daemon |
+| RuviCode native Telegram/Discord runtime | `slices/bots/`, `src/main.rs` | `done` | `BotSessionRouter` bridging `EventBus` <-> `execute_agent_loop` <-> `send_reply` + `ruvi bots` CLI daemon |
 
 ### Wave 4C — Cross-Harness Agent Profiles (`Feature/agent-profiles`)
 | Unit / Reference | RuviCode Target | State | Notes |
