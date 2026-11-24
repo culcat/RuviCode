@@ -9,7 +9,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ruvi_core::{
     AppEvent, ChatMessage, CoreResult, EventBus, ExtensionRegistry, MessageRole, RuntimeStatus,
-    ThemePalette, UiTheme,
+    SessionId, SessionRecord, SessionSummary, ThemePalette, UiTheme,
 };
 use tokio::sync::mpsc;
 
@@ -20,6 +20,7 @@ use crate::slices::chat::{
 /// Built-in slash commands exposed in the Command Palette (`Ctrl+P` / `/help`).
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/models", "Select active LLM provider and model"),
+    ("/sessions", "List and resume saved chat sessions"),
     (
         "/local",
         "Install or inspect Ollama, llama.cpp, and Whisper STT",
@@ -59,6 +60,13 @@ pub enum ActiveModal {
         /// Live status message for install/pull tasks.
         busy_message: Option<String>,
     },
+    /// Interactive picker for persisted sessions.
+    SessionSelector {
+        /// Available saved sessions.
+        sessions: Vec<SessionSummary>,
+        /// Highlighted session index.
+        selected: usize,
+    },
     /// Read-only inspection modal for skills, plugins, or bots.
     Info {
         /// Modal title.
@@ -72,6 +80,8 @@ enum BgResult {
     StreamEvent(ChatLoopEvent),
     ChatFinished(CoreResult<AgentLoopOutcome>),
     ModelsLoaded(Vec<(String, String)>),
+    SessionsLoaded(Vec<SessionSummary>),
+    SessionRestored(CoreResult<SessionRecord>),
     RuntimesRefreshed(Vec<RuntimeStatus>),
     RuntimeActionFinished {
         result: CoreResult<String>,
@@ -250,6 +260,44 @@ impl TuiApp {
         });
     }
 
+    fn spawn_session_list(&mut self) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        self.status_line = "Loading saved sessions...".to_string();
+        tokio::spawn(async move {
+            let sessions = match registry.session_store() {
+                Some(store) => store.list().await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let _ = tx.send(BgResult::SessionsLoaded(sessions));
+        });
+    }
+
+    fn spawn_session_load(&mut self, id: SessionId) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let result = match registry.session_store() {
+                Some(store) => store.load(id).await,
+                None => Err(ruvi_core::CoreError::NotFound {
+                    kind: "session_store",
+                    id: "default".to_string(),
+                }),
+            };
+            let _ = tx.send(BgResult::SessionRestored(result));
+        });
+    }
+
+    fn spawn_session_autosave(&self) {
+        let Some(store) = self.registry.session_store() else {
+            return;
+        };
+        let record = self.engine.export_record();
+        tokio::spawn(async move {
+            let _ = store.save(&record).await;
+        });
+    }
+
     fn submit_prompt(&mut self, text: &str) {
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -322,6 +370,7 @@ impl TuiApp {
         match cmd {
             "/help" => self.modal = ActiveModal::CommandPalette { selected: 0 },
             "/models" => self.spawn_model_discovery(),
+            "/sessions" => self.spawn_session_list(),
             "/local" => {
                 self.modal = ActiveModal::LocalInstaller {
                     selected: 0,
@@ -588,6 +637,24 @@ impl TuiApp {
                 }
                 _ => {}
             },
+            ActiveModal::SessionSelector { sessions, selected } => match key.code {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    if *selected + 1 < sessions.len() {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(summary) = sessions.get(*selected) {
+                        let id = summary.id;
+                        self.modal = ActiveModal::None;
+                        self.spawn_session_load(id);
+                    } else {
+                        self.modal = ActiveModal::None;
+                    }
+                }
+                _ => {}
+            },
             ActiveModal::Info { .. } | ActiveModal::None => {}
         }
     }
@@ -608,6 +675,7 @@ impl TuiApp {
                 self.in_flight = false;
                 self.streaming_buffer.clear();
                 self.engine.extend_messages(outcome.generated_messages);
+                self.spawn_session_autosave();
                 self.status_line = format!("Completed via {}", outcome.response.model);
             }
             BgResult::ChatFinished(Err(err)) => {
@@ -623,6 +691,22 @@ impl TuiApp {
                     selected: 0,
                 };
                 self.status_line = "Loaded available models".to_string();
+            }
+            BgResult::SessionsLoaded(sessions) => {
+                self.modal = ActiveModal::SessionSelector {
+                    sessions,
+                    selected: 0,
+                };
+                self.status_line = "Loaded saved sessions".to_string();
+            }
+            BgResult::SessionRestored(Ok(record)) => {
+                let id = record.id;
+                self.engine.restore_record(record);
+                self.scroll_offset = 0;
+                self.status_line = format!("Resumed session {id}");
+            }
+            BgResult::SessionRestored(Err(err)) => {
+                self.status_line = format!("Failed to load session: {err}");
             }
             BgResult::RuntimesRefreshed(statuses) => {
                 self.runtime_statuses = statuses;

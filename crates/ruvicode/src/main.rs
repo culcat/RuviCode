@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use ruvi_core::{AgentMode, EventBus};
+use ruvi_core::{AgentMode, EventBus, SessionId};
 use ruvicode::bootstrap::build_registry;
 use ruvicode::slices::chat::ChatEngine;
 use ruvicode::slices::providers::detect_initial_provider_and_model;
@@ -20,6 +20,10 @@ struct Cli {
     /// Workspace directory path (defaults to current working directory).
     #[arg(short, long)]
     workspace: Option<PathBuf>,
+
+    /// Resume a persisted session by UUID when launching the TUI.
+    #[arg(long)]
+    resume: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -83,13 +87,20 @@ async fn main() -> Result<()> {
         None => {
             let (provider_id, model) = detect_initial_provider_and_model(&registry).await;
             let statuses = collect_runtime_statuses(&registry).await;
-            let engine = ChatEngine::new(
+            let mut engine = ChatEngine::new(
                 Arc::clone(&registry),
                 bus.clone(),
                 context,
                 provider_id,
                 model,
             );
+            if let Some(session_str) = cli.resume
+                && let Some(store) = registry.session_store()
+            {
+                let id = SessionId::parse(&session_str)?;
+                let record = store.load(id).await?;
+                engine.restore_record(record);
+            }
             let branch = detect_git_branch(&workspace);
             let app = TuiApp::new(
                 workspace.display().to_string(),

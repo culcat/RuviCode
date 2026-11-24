@@ -13,6 +13,17 @@ impl SessionId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Parses a [`SessionId`] from a UUID string.
+    ///
+    /// # Errors
+    /// Returns [`crate::CoreError::Config`] if `raw` is not a valid UUID.
+    pub fn parse(raw: &str) -> crate::CoreResult<Self> {
+        let uuid = Uuid::parse_str(raw.trim()).map_err(|err| {
+            crate::CoreError::Config(format!("invalid session id `{raw}`: {err}"))
+        })?;
+        Ok(Self(uuid))
+    }
 }
 
 impl Default for SessionId {
@@ -318,4 +329,36 @@ pub struct ThemePalette {
     pub success: (u8, u8, u8),
     /// Warning / `[PLAN]` badge RGB.
     pub warning: (u8, u8, u8),
+}
+
+/// Full serialized snapshot of an agent session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRecord {
+    /// Session identifier.
+    pub id: SessionId,
+    /// Human-readable session title (usually derived from the first user prompt).
+    pub title: String,
+    /// Active provider identifier.
+    pub provider_id: String,
+    /// Active model identifier.
+    pub model: String,
+    /// Active [`AgentMode`].
+    pub mode: AgentMode,
+    /// Conversation history.
+    pub messages: Vec<ChatMessage>,
+}
+
+/// Lightweight summary of a persisted session shown in pickers and CLI lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// Session identifier.
+    pub id: SessionId,
+    /// Human-readable title.
+    pub title: String,
+    /// Provider identifier.
+    pub provider_id: String,
+    /// Model identifier.
+    pub model: String,
+    /// Number of stored messages.
+    pub message_count: usize,
 }
