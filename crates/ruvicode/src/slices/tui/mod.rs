@@ -1,0 +1,754 @@
+pub mod theme;
+mod view;
+
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ruvi_core::{
+    AppEvent, ChatMessage, CompletionRequest, CompletionResponse, CoreResult, EventBus,
+    ExtensionRegistry, MessageRole, RuntimeStatus, ThemePalette, UiTheme,
+};
+use tokio::sync::mpsc;
+
+use crate::slices::chat::ChatEngine;
+
+/// Built-in slash commands exposed in the Command Palette (`Ctrl+P` / `/help`).
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("/models", "Select active LLM provider and model"),
+    (
+        "/local",
+        "Install or inspect Ollama, llama.cpp, and Whisper STT",
+    ),
+    ("/skills", "Show discovered skills across harnesses"),
+    ("/plugins", "Inspect loaded WASM/native plugins and tools"),
+    ("/bots", "Inspect Telegram & Discord bot gateways"),
+    ("/voice", "Transcribe an audio file (`/voice <path>`)"),
+    ("/theme", "Cycle active UI theme"),
+    ("/mode", "Toggle BUILD / PLAN mode"),
+    ("/clear", "Clear conversation history"),
+    ("/help", "Open this command palette"),
+];
+
+/// Currently open overlay modal in the TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveModal {
+    /// No modal open.
+    None,
+    /// Interactive command palette.
+    CommandPalette {
+        /// Highlighted command index.
+        selected: usize,
+    },
+    /// Interactive provider/model selector.
+    ModelSelector {
+        /// `(provider_id, model_name)` list.
+        entries: Vec<(String, String)>,
+        /// Highlighted entry index.
+        selected: usize,
+    },
+    /// Local AI runtime installer (`ollama`, `llama.cpp`, `whisper-cpp`).
+    LocalInstaller {
+        /// Highlighted runtime index.
+        selected: usize,
+        /// Live status message for install/pull tasks.
+        busy_message: Option<String>,
+    },
+    /// Read-only inspection modal for skills, plugins, or bots.
+    Info {
+        /// Modal title.
+        title: String,
+        /// Text lines displayed inside modal.
+        lines: Vec<String>,
+    },
+}
+
+enum BgResult {
+    ChatFinished(CoreResult<CompletionResponse>),
+    ModelsLoaded(Vec<(String, String)>),
+    RuntimesRefreshed(Vec<RuntimeStatus>),
+    RuntimeActionFinished {
+        result: CoreResult<String>,
+        statuses: Vec<RuntimeStatus>,
+    },
+    VoiceTranscribed(CoreResult<String>),
+}
+
+/// Interactive state for the `OpenCode`-inspired TUI.
+pub struct TuiApp {
+    /// Workspace path shown in Hero card.
+    pub workspace_display: String,
+    /// Current git branch label shown in top header.
+    pub git_branch: String,
+    /// Core chat engine managing history and active provider/model.
+    pub engine: ChatEngine,
+    /// OCP extension registry.
+    pub registry: Arc<ExtensionRegistry>,
+    /// Event bus for cross-slice notifications.
+    pub bus: EventBus,
+    /// Cached statuses of registered local runtimes.
+    pub runtime_statuses: Vec<RuntimeStatus>,
+    /// Currently active [`ruvi_core::UiTheme`] ID.
+    pub theme_id: String,
+    /// Prompt input buffer.
+    pub input: String,
+    /// Vertical scroll line offset for chat timeline.
+    pub scroll_offset: u16,
+    /// Whether the right Context & Extensions sidebar is visible.
+    pub show_sidebar: bool,
+    /// Active overlay modal.
+    pub modal: ActiveModal,
+    /// Footer status message.
+    pub status_line: String,
+    /// Whether an async completion is currently running.
+    pub in_flight: bool,
+    /// Spinner animation frame counter.
+    pub spinner_tick: usize,
+    /// Exit flag.
+    pub should_quit: bool,
+    bg_tx: mpsc::UnboundedSender<BgResult>,
+    bg_rx: mpsc::UnboundedReceiver<BgResult>,
+}
+
+impl TuiApp {
+    /// Creates a new [`TuiApp`].
+    #[must_use]
+    pub fn new(
+        workspace_display: String,
+        git_branch: String,
+        engine: ChatEngine,
+        registry: Arc<ExtensionRegistry>,
+        bus: EventBus,
+        runtime_statuses: Vec<RuntimeStatus>,
+    ) -> Self {
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+        Self {
+            workspace_display,
+            git_branch,
+            engine,
+            registry,
+            bus,
+            runtime_statuses,
+            theme_id: "opencode-dark".to_string(),
+            input: String::new(),
+            scroll_offset: 0,
+            show_sidebar: true,
+            modal: ActiveModal::None,
+            status_line: "Ready".to_string(),
+            in_flight: false,
+            spinner_tick: 0,
+            should_quit: false,
+            bg_tx,
+            bg_rx,
+        }
+    }
+
+    /// Resolves the active [`ThemePalette`] from [`ExtensionRegistry`].
+    #[must_use]
+    pub fn current_palette(&self) -> ThemePalette {
+        if let Ok(theme) = self.registry.theme(&self.theme_id) {
+            return theme.palette();
+        }
+        theme::OpenCodeDarkTheme.palette()
+    }
+
+    fn cycle_theme(&mut self) {
+        let themes = self.registry.themes();
+        if themes.is_empty() {
+            return;
+        }
+        let current_idx = themes
+            .iter()
+            .position(|t| t.id() == self.theme_id)
+            .unwrap_or(0);
+        let next = &themes[(current_idx + 1) % themes.len()];
+        self.theme_id = next.id().to_string();
+        self.status_line = format!("Theme switched to {}", next.display_name());
+    }
+
+    fn spawn_model_discovery(&mut self) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        self.status_line = "Discovering available models...".to_string();
+        tokio::spawn(async move {
+            let mut entries = Vec::new();
+            for provider in registry.providers() {
+                if let Ok(models) = provider.list_models().await {
+                    for model in models {
+                        entries.push((provider.id().to_string(), model));
+                    }
+                }
+            }
+            let _ = tx.send(BgResult::ModelsLoaded(entries));
+        });
+    }
+
+    fn spawn_runtime_refresh(&mut self) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let statuses = collect_runtime_statuses(&registry).await;
+            let _ = tx.send(BgResult::RuntimesRefreshed(statuses));
+        });
+    }
+
+    fn spawn_runtime_install(&mut self, runtime_id: String) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        if let ActiveModal::LocalInstaller { busy_message, .. } = &mut self.modal {
+            *busy_message = Some(format!("Installing `{runtime_id}`..."));
+        }
+        tokio::spawn(async move {
+            let result = match registry.runtime(&runtime_id) {
+                Ok(rt) => rt.install_runtime().await,
+                Err(err) => Err(err),
+            };
+            let statuses = collect_runtime_statuses(&registry).await;
+            let _ = tx.send(BgResult::RuntimeActionFinished { result, statuses });
+        });
+    }
+
+    fn spawn_ollama_pull(&mut self, model: String) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        if let ActiveModal::LocalInstaller { busy_message, .. } = &mut self.modal {
+            *busy_message = Some(format!("Pulling `{model}` with Ollama..."));
+        }
+        tokio::spawn(async move {
+            let result = match registry.runtime("ollama") {
+                Ok(rt) => rt.pull_model(&model).await,
+                Err(err) => Err(err),
+            };
+            let statuses = collect_runtime_statuses(&registry).await;
+            let _ = tx.send(BgResult::RuntimeActionFinished { result, statuses });
+        });
+    }
+
+    fn spawn_voice_transcribe(&mut self, audio_path: String) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        self.status_line = format!("Transcribing {audio_path}...");
+        tokio::spawn(async move {
+            let transcriber = registry.transcribers().into_iter().next();
+            let result = match transcriber {
+                Some(t) => t.transcribe_file(Path::new(&audio_path)).await,
+                None => Err(ruvi_core::CoreError::NotFound {
+                    kind: "transcriber",
+                    id: "whisper-cpp".to_string(),
+                }),
+            };
+            let _ = tx.send(BgResult::VoiceTranscribed(result));
+        });
+    }
+
+    fn submit_prompt(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if trimmed.starts_with('/') {
+            self.execute_slash_command(trimmed);
+            return;
+        }
+        if self.in_flight {
+            self.status_line = "Wait for active completion to finish".to_string();
+            return;
+        }
+
+        let _ = self.bus.publish(AppEvent::PromptSubmitted {
+            session_id: self.engine.session_id(),
+            text: trimmed.to_string(),
+        });
+
+        let mut request_messages = Vec::with_capacity(self.engine.messages().len() + 2);
+        request_messages.push(ChatMessage::new(
+            MessageRole::System,
+            self.engine.build_system_prompt(),
+        ));
+        request_messages.extend(self.engine.messages().iter().cloned());
+        request_messages.push(ChatMessage::new(MessageRole::User, trimmed));
+
+        let provider_id = self.engine.provider_id().to_string();
+        let model = self.engine.model().to_string();
+        let mode = self.engine.mode();
+        self.engine.push_user_message(trimmed);
+
+        self.in_flight = true;
+        self.status_line = format!("Running {provider_id}/{model}...");
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let res = match registry.provider(&provider_id) {
+                Ok(provider) => {
+                    provider
+                        .complete(CompletionRequest {
+                            model,
+                            messages: request_messages,
+                            mode,
+                        })
+                        .await
+                }
+                Err(err) => Err(err),
+            };
+            let _ = tx.send(BgResult::ChatFinished(res));
+        });
+    }
+
+    fn execute_slash_command(&mut self, cmd_line: &str) {
+        let mut parts = cmd_line.splitn(2, ' ');
+        let cmd = parts.next().unwrap_or("");
+        let arg = parts.next().unwrap_or("").trim();
+
+        match cmd {
+            "/help" => self.modal = ActiveModal::CommandPalette { selected: 0 },
+            "/models" => self.spawn_model_discovery(),
+            "/local" => {
+                self.modal = ActiveModal::LocalInstaller {
+                    selected: 0,
+                    busy_message: None,
+                };
+                self.spawn_runtime_refresh();
+            }
+            "/skills" => self.open_skills_modal(),
+            "/plugins" => self.open_plugins_modal(),
+            "/bots" => self.open_bots_modal(),
+            "/voice" => self.handle_voice_command(arg),
+            "/theme" => self.cycle_theme(),
+            "/mode" => {
+                let mode = self.engine.toggle_mode();
+                self.status_line = format!("Switched to [{}] mode", mode.badge());
+            }
+            "/clear" => {
+                self.engine.clear_messages();
+                self.scroll_offset = 0;
+                self.status_line = "Cleared session history".to_string();
+            }
+            other => self.status_line = format!("Unknown command `{other}` (try /help)"),
+        }
+    }
+
+    fn open_skills_modal(&mut self) {
+        let mut lines: Vec<String> = self
+            .engine
+            .context()
+            .skills
+            .iter()
+            .map(|s| format!("• {} [{}] — {}", s.name, s.source_harness, s.description))
+            .collect();
+        if lines.is_empty() {
+            lines.push(
+                "No skills found in .agents/skills, .claude/skills, or .opencode/skills."
+                    .to_string(),
+            );
+        }
+        self.modal = ActiveModal::Info {
+            title: "Discovered Harness Skills".to_string(),
+            lines,
+        };
+    }
+
+    fn open_plugins_modal(&mut self) {
+        let mut lines = Vec::new();
+        for manifest in self.registry.plugin_manifests() {
+            lines.push(format!(
+                "• {} v{} ({}) — {}",
+                manifest.name,
+                manifest.version,
+                manifest.capabilities.join(","),
+                manifest.source
+            ));
+        }
+        for tool in self.registry.tools() {
+            lines.push(format!("Tool: {} — {}", tool.name(), tool.description()));
+        }
+        if lines.is_empty() {
+            lines.push(
+                "No plugins loaded. Place .wasm or .wat plugins in .ruvi/plugins/.".to_string(),
+            );
+        }
+        self.modal = ActiveModal::Info {
+            title: "Plugins & Tools".to_string(),
+            lines,
+        };
+    }
+
+    fn open_bots_modal(&mut self) {
+        let lines = self
+            .registry
+            .channels()
+            .into_iter()
+            .map(|ch| {
+                let status = if ch.is_configured() {
+                    "CONFIGURED"
+                } else {
+                    "UNCONFIGURED"
+                };
+                format!("• {} ({}) — {status}", ch.display_name(), ch.id())
+            })
+            .chain([
+                String::new(),
+                "Env vars:".to_string(),
+                "  Telegram: RUVI_TELEGRAM_BOT_TOKEN, RUVI_TELEGRAM_CHAT_ID".to_string(),
+                "  Discord:  RUVI_DISCORD_BOT_TOKEN, RUVI_DISCORD_CHANNEL_ID".to_string(),
+            ])
+            .collect();
+        self.modal = ActiveModal::Info {
+            title: "Messaging Bot Gateways".to_string(),
+            lines,
+        };
+    }
+
+    fn handle_voice_command(&mut self, arg: &str) {
+        if arg.is_empty() {
+            self.modal = ActiveModal::Info {
+                title: "Voice Input (Whisper STT)".to_string(),
+                lines: vec![
+                    "Usage: /voice <path-to-wav-or-mp3>".to_string(),
+                    "Install local Whisper via `/local` or `brew install whisper-cpp`.".to_string(),
+                ],
+            };
+        } else {
+            self.spawn_voice_transcribe(arg.to_string());
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'q'))
+        {
+            self.should_quit = true;
+            return;
+        }
+
+        if !matches!(self.modal, ActiveModal::None) {
+            self.handle_modal_key(key);
+            return;
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('p') => {
+                    self.modal = ActiveModal::CommandPalette { selected: 0 };
+                    return;
+                }
+                KeyCode::Char('l') => {
+                    self.execute_slash_command("/local");
+                    return;
+                }
+                KeyCode::Char('b') => {
+                    self.show_sidebar = !self.show_sidebar;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Tab => {
+                let mode = self.engine.toggle_mode();
+                self.status_line = format!("Switched to [{}] mode", mode.badge());
+            }
+            KeyCode::Enter => {
+                let text = std::mem::take(&mut self.input);
+                self.submit_prompt(&text);
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Up => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.scroll_offset = self.scroll_offset.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(8);
+            }
+            KeyCode::PageDown => {
+                self.scroll_offset = self.scroll_offset.saturating_add(8);
+            }
+            KeyCode::Char(c) => {
+                self.input.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_modal_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.modal = ActiveModal::None;
+            return;
+        }
+
+        match &mut self.modal {
+            ActiveModal::CommandPalette { selected } => match key.code {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    if *selected + 1 < COMMANDS.len() {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let cmd = COMMANDS[*selected].0;
+                    self.modal = ActiveModal::None;
+                    self.execute_slash_command(cmd);
+                }
+                _ => {}
+            },
+            ActiveModal::ModelSelector { entries, selected } => match key.code {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    if *selected + 1 < entries.len() {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some((provider, model)) = entries.get(*selected).cloned() {
+                        self.engine.select_model(&provider, &model);
+                        self.status_line = format!("Selected {provider} / {model}");
+                    }
+                    self.modal = ActiveModal::None;
+                }
+                _ => {}
+            },
+            ActiveModal::LocalInstaller { selected, .. } => match key.code {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    if *selected + 1 < self.runtime_statuses.len() {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Char('r') => self.spawn_runtime_refresh(),
+                KeyCode::Char('i') => {
+                    if let Some(rt) = self.runtime_statuses.get(*selected) {
+                        let id = rt.id.clone();
+                        self.spawn_runtime_install(id);
+                    }
+                }
+                KeyCode::Char('p') => {
+                    self.spawn_ollama_pull("qwen2.5-coder:7b".to_string());
+                }
+                _ => {}
+            },
+            ActiveModal::Info { .. } | ActiveModal::None => {}
+        }
+    }
+
+    fn handle_bg_result(&mut self, msg: BgResult) {
+        match msg {
+            BgResult::ChatFinished(Ok(response)) => {
+                self.in_flight = false;
+                self.engine.push_assistant_message(response.content);
+                self.status_line = format!("Completed via {}", response.model);
+            }
+            BgResult::ChatFinished(Err(err)) => {
+                self.in_flight = false;
+                self.engine
+                    .push_system_note(format!("Provider error: {err}"));
+                self.status_line = format!("Error: {err}");
+            }
+            BgResult::ModelsLoaded(entries) => {
+                self.modal = ActiveModal::ModelSelector {
+                    entries,
+                    selected: 0,
+                };
+                self.status_line = "Loaded available models".to_string();
+            }
+            BgResult::RuntimesRefreshed(statuses) => {
+                self.runtime_statuses = statuses;
+                self.status_line = "Refreshed local runtime statuses".to_string();
+            }
+            BgResult::RuntimeActionFinished { result, statuses } => {
+                self.runtime_statuses = statuses;
+                let msg = match result {
+                    Ok(ok) => ok,
+                    Err(err) => format!("Failed: {err}"),
+                };
+                if let ActiveModal::LocalInstaller { busy_message, .. } = &mut self.modal {
+                    *busy_message = Some(msg.clone());
+                }
+                self.status_line = msg;
+            }
+            BgResult::VoiceTranscribed(Ok(transcript)) => {
+                self.input = transcript;
+                self.status_line = "Voice transcribed into prompt input".to_string();
+            }
+            BgResult::VoiceTranscribed(Err(err)) => {
+                self.status_line = format!("Voice error: {err}");
+            }
+        }
+    }
+}
+
+/// Queries live statuses for every registered [`ruvi_core::LocalRuntimeManager`].
+pub async fn collect_runtime_statuses(registry: &ExtensionRegistry) -> Vec<RuntimeStatus> {
+    let mut statuses = Vec::new();
+    for rt in registry.runtimes() {
+        if let Ok(status) = rt.status().await {
+            statuses.push(status);
+        }
+    }
+    statuses
+}
+
+/// Runs the interactive `ratatui` event loop until the user quits (`Ctrl+Q` / `Ctrl+C`).
+///
+/// # Errors
+/// Returns [`std::io::Error`] if terminal rendering fails.
+pub async fn run_tui(mut app: TuiApp) -> std::io::Result<()> {
+    let mut terminal = ratatui::init();
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEvent>();
+    let running = Arc::new(AtomicBool::new(true));
+    let reader_running = Arc::clone(&running);
+
+    let reader_handle = std::thread::spawn(move || {
+        while reader_running.load(Ordering::Relaxed) {
+            if event::poll(Duration::from_millis(80)).unwrap_or(false)
+                && let Ok(Event::Key(key)) = event::read()
+                && key_tx.send(key).is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let mut tick = tokio::time::interval(Duration::from_millis(120));
+    while !app.should_quit {
+        terminal.draw(|frame| view::render(frame, &app))?;
+
+        tokio::select! {
+            Some(key) = key_rx.recv() => {
+                app.handle_key(key);
+            }
+            Some(bg) = app.bg_rx.recv() => {
+                app.handle_bg_result(bg);
+            }
+            _ = tick.tick() => {
+                if app.in_flight {
+                    app.spinner_tick = app.spinner_tick.wrapping_add(1);
+                }
+            }
+        }
+    }
+
+    running.store(false, Ordering::Relaxed);
+    let _ = reader_handle.join();
+    ratatui::restore();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ruvi_core::{HarnessContext, RuntimeKind};
+
+    use super::*;
+    use crate::slices::providers::register_default_providers;
+
+    fn build_test_app() -> TuiApp {
+        let mut registry = ExtensionRegistry::new();
+        register_default_providers(&mut registry);
+        theme::register_default_themes(&mut registry);
+        let registry = Arc::new(registry);
+        let bus = EventBus::default();
+        let engine = ChatEngine::new(
+            Arc::clone(&registry),
+            bus.clone(),
+            HarnessContext::default(),
+            "ruvi-demo",
+            "ruvi-demo-v1",
+        );
+
+        let runtimes = vec![RuntimeStatus {
+            id: "ollama".to_string(),
+            display_name: "Ollama".to_string(),
+            kind: RuntimeKind::Ollama,
+            installed: true,
+            running: false,
+            version: Some("0.6.0".to_string()),
+            models: vec!["qwen2.5-coder:7b".to_string()],
+            install_hint: "brew install ollama".to_string(),
+        }];
+
+        TuiApp::new(
+            "/workspace/RuviCode".to_string(),
+            "dev".to_string(),
+            engine,
+            registry,
+            bus,
+            runtimes,
+        )
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn renders_hero_screen_with_opencode_layout() {
+        let app = build_test_app();
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal must init");
+
+        terminal
+            .draw(|frame| view::render(frame, &app))
+            .expect("draw must succeed");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("RUVICODE"));
+        assert!(rendered.contains("[BUILD]"));
+        assert!(rendered.contains("Context & Extensions"));
+        assert!(rendered.contains("/local"));
+    }
+
+    #[test]
+    fn renders_chat_timeline_and_plan_mode() {
+        let mut app = build_test_app();
+        app.engine.toggle_mode();
+        app.engine.push_user_message("Explain Vertical Slice");
+        app.engine
+            .push_assistant_message("Each slice owns its vertical stack.");
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal must init");
+        terminal
+            .draw(|frame| view::render(frame, &app))
+            .expect("draw must succeed");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("[PLAN]"));
+        assert!(rendered.contains("Explain Vertical Slice"));
+        assert!(rendered.contains("Each slice owns its vertical stack."));
+    }
+
+    #[test]
+    fn renders_local_installer_modal() {
+        let mut app = build_test_app();
+        app.modal = ActiveModal::LocalInstaller {
+            selected: 0,
+            busy_message: None,
+        };
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal must init");
+        terminal
+            .draw(|frame| view::render(frame, &app))
+            .expect("draw must succeed");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Local AI Runtime Installer"));
+        assert!(rendered.contains("Ollama"));
+        assert!(rendered.contains("qwen2.5-coder:7b"));
+    }
+}
