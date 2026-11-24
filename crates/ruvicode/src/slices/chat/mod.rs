@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use ruvi_core::{
     AgentMode, AppEvent, ChatMessage, CompletionRequest, CompletionResponse, CoreResult, EventBus,
-    ExtensionRegistry, HarnessContext, MessageRole, SessionId, ToolDefinition,
+    ExtensionRegistry, HarnessContext, MessageRole, SessionId, SessionRecord, ToolDefinition,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -176,6 +176,36 @@ impl ChatEngine {
     /// Appends a batch of generated messages (e.g., from an async agent loop).
     pub fn extend_messages(&mut self, msgs: Vec<ChatMessage>) {
         self.messages.extend(msgs);
+    }
+
+    /// Exports the current session state as a persistable [`SessionRecord`].
+    #[must_use]
+    pub fn export_record(&self) -> SessionRecord {
+        let title = self
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::User)
+            .map_or_else(
+                || "Untitled session".to_string(),
+                |m| m.content.chars().take(48).collect(),
+            );
+        SessionRecord {
+            id: self.session_id,
+            title,
+            provider_id: self.provider_id.clone(),
+            model: self.model.clone(),
+            mode: self.mode,
+            messages: self.messages.clone(),
+        }
+    }
+
+    /// Restores session state from a loaded [`SessionRecord`].
+    pub fn restore_record(&mut self, record: SessionRecord) {
+        self.session_id = record.id;
+        self.provider_id = record.provider_id;
+        self.model = record.model;
+        self.mode = record.mode;
+        self.messages = record.messages;
     }
 
     /// Builds the system prompt reflecting active mode, rules, skills, MCP servers, and tools.

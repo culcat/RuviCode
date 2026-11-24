@@ -3,7 +3,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
-use ruvi_core::{AgentMode, MessageRole, ThemePalette};
+use ruvi_core::{AgentMode, MessageRole, SessionSummary, ThemePalette};
 
 use super::theme::rgb;
 use super::{ActiveModal, COMMANDS, TuiApp};
@@ -442,6 +442,9 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, root
                 root,
             );
         }
+        ActiveModal::SessionSelector { sessions, selected } => {
+            render_session_selector(frame, sessions, *selected, palette, root);
+        }
         ActiveModal::Info { title, lines } => render_info_modal(frame, title, lines, palette, root),
     }
 }
@@ -592,6 +595,51 @@ fn render_local_installer(
             .style(Style::default().bg(rgb(palette.surface))),
     );
     frame.render_widget(widget, area);
+}
+
+fn render_session_selector(
+    frame: &mut Frame<'_>,
+    sessions: &[SessionSummary],
+    selected: usize,
+    palette: ThemePalette,
+    root: Rect,
+) {
+    let area = centered_rect(76, 62, root);
+    frame.render_widget(Clear, area);
+    let items: Vec<ListItem<'_>> = if sessions.is_empty() {
+        vec![
+            ListItem::new(" No saved sessions yet in .ruvi/sessions/")
+                .style(Style::default().fg(rgb(palette.muted))),
+        ]
+    } else {
+        sessions
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| {
+                let style = if idx == selected {
+                    Style::default()
+                        .fg(rgb(palette.background))
+                        .bg(rgb(palette.accent))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgb(palette.text))
+                };
+                ListItem::new(format!(
+                    " {}  ({} msgs, {}/{}) — {}",
+                    s.title, s.message_count, s.provider_id, s.model, s.id
+                ))
+                .style(style)
+            })
+            .collect()
+    };
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Saved Sessions (Enter to resume, Esc to close) ")
+            .border_style(Style::default().fg(rgb(palette.accent)))
+            .style(Style::default().bg(rgb(palette.surface))),
+    );
+    frame.render_widget(list, area);
 }
 
 fn render_info_modal(

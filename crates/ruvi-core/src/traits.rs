@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::bus::EventBus;
 use crate::domain::{
     CompletionRequest, CompletionResponse, HarnessContext, PluginManifest, RuntimeStatus,
-    ThemePalette,
+    SessionId, SessionRecord, SessionSummary, ThemePalette,
 };
 use crate::error::CoreResult;
 
@@ -183,4 +183,29 @@ pub trait UiTheme: Send + Sync {
 
     /// Theme color palette.
     fn palette(&self) -> ThemePalette;
+}
+
+/// Persistent storage backend for agent conversation sessions (JSON files, `SQLite`, etc.).
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    /// Stable store identifier.
+    fn id(&self) -> &str;
+
+    /// Saves or overwrites a [`SessionRecord`].
+    ///
+    /// # Errors
+    /// Returns [`crate::CoreError::Io`] or [`crate::CoreError::Execution`] if persistence fails.
+    async fn save(&self, record: &SessionRecord) -> CoreResult<()>;
+
+    /// Loads a [`SessionRecord`] by [`SessionId`].
+    ///
+    /// # Errors
+    /// Returns [`crate::CoreError::NotFound`] or [`crate::CoreError::Io`] if missing/unreadable.
+    async fn load(&self, id: SessionId) -> CoreResult<SessionRecord>;
+
+    /// Lists available persisted sessions.
+    ///
+    /// # Errors
+    /// Returns [`crate::CoreError::Io`] if listing fails.
+    async fn list(&self) -> CoreResult<Vec<SessionSummary>>;
 }

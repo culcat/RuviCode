@@ -5,7 +5,7 @@ use crate::domain::PluginManifest;
 use crate::error::{CoreError, CoreResult};
 use crate::traits::{
     AgentTool, ChannelGateway, ContextLoader, LlmProvider, LocalRuntimeManager, PluginHost,
-    SpeechTranscriber, UiTheme,
+    SessionStore, SpeechTranscriber, UiTheme,
 };
 
 /// Central Open/Closed extension container holding all replaceable `RuviCode` subsystems.
@@ -22,6 +22,7 @@ pub struct ExtensionRegistry {
     channels: BTreeMap<String, Arc<dyn ChannelGateway>>,
     plugin_hosts: BTreeMap<String, Arc<dyn PluginHost>>,
     themes: BTreeMap<String, Arc<dyn UiTheme>>,
+    session_stores: BTreeMap<String, Arc<dyn SessionStore>>,
     plugin_manifests: Vec<PluginManifest>,
 }
 
@@ -71,6 +72,11 @@ impl ExtensionRegistry {
     /// Registers or replaces a [`UiTheme`] keyed by [`UiTheme::id`].
     pub fn register_theme(&mut self, theme: Arc<dyn UiTheme>) {
         self.themes.insert(theme.id().to_string(), theme);
+    }
+
+    /// Registers or replaces a [`SessionStore`] keyed by [`SessionStore::id`].
+    pub fn register_session_store(&mut self, store: Arc<dyn SessionStore>) {
+        self.session_stores.insert(store.id().to_string(), store);
     }
 
     /// Records manifests of dynamically loaded plugins.
@@ -186,6 +192,12 @@ impl ExtensionRegistry {
     #[must_use]
     pub fn plugin_manifests(&self) -> &[PluginManifest] {
         &self.plugin_manifests
+    }
+
+    /// Returns the primary [`SessionStore`], if any is registered.
+    #[must_use]
+    pub fn session_store(&self) -> Option<Arc<dyn SessionStore>> {
+        self.session_stores.values().next().cloned()
     }
 }
 
