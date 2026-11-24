@@ -24,7 +24,7 @@
 ## Wave 3 — Post-MVP Hardening & Deep Parity (`Future Feature/*` branches)
 | Unit / Reference | Planned Branch | State | Notes |
 |---|---|---|---|
-| Streaming SSE token chunks & tool-call loop | `Feature/streaming-tool-loop` | `open` | Multi-step agentic tool execution + streaming tokens |
+| Streaming SSE token chunks & tool-call loop | `Feature/streaming-tool-loop` | `done` | Multi-step agentic tool execution + streaming tokens + built-in `read_file`/`list_dir` tools |
 | SQLite persistent session history (`database/`) | `Feature/session-persistence` | `open` | Persistent sessions, resume, and compaction |
 | Live MCP stdio/SSE client transport (`mcp/`) | `Feature/mcp-client-runtime` | `open` | Spawn and invoke live MCP server tools |
 | Live audio capture (`cpal`) -> Whisper STT | `Feature/voice-mic-capture` | `open` | Direct microphone push-to-talk in TUI |

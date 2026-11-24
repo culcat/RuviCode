@@ -8,6 +8,7 @@ use crate::slices::harness_compat::MultiHarnessContextLoader;
 use crate::slices::local_llm::{LlamaCppRuntimeManager, OllamaRuntimeManager};
 use crate::slices::plugins_wasm::WasmiPluginHost;
 use crate::slices::providers::register_default_providers;
+use crate::slices::tools::register_builtin_tools;
 use crate::slices::tui::theme;
 use crate::slices::voice::{WhisperCliTranscriber, WhisperRuntimeManager};
 
@@ -21,6 +22,7 @@ pub async fn build_registry(
     let mut registry = ExtensionRegistry::new();
 
     register_default_providers(&mut registry);
+    register_builtin_tools(&mut registry, workspace);
 
     registry.register_runtime(Arc::new(OllamaRuntimeManager::new()));
     registry.register_runtime(Arc::new(LlamaCppRuntimeManager::new()));
