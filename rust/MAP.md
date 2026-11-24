@@ -28,7 +28,7 @@
 | SQLite persistent session history (`database/`) | `Feature/session-persistence` | `done` | `SessionStore` OCP trait + `JsonSessionStore` (`.ruvi/sessions/*.json`), `/sessions`, `--resume` |
 | Live MCP stdio/SSE client transport (`mcp/`) | `Feature/mcp-client-runtime` | `done` | Live stdio JSON-RPC 2.0 MCP client registering `mcp__<srv>__<tool>` as `AgentTool` |
 | Live audio capture (`cpal`) -> Whisper STT | `Feature/voice-mic-capture` | `open` | Direct microphone push-to-talk in TUI |
-| Extism / Component-Model WASM plugin ABI v2 | `Feature/wasm-plugin-abi-v2` | `open` | Rich host functions & UI panel extensions |
+| Extism / Component-Model WASM plugin ABI v2 | `Feature/wasm-plugin-abi-v2` | `done` | Linear-memory JSON ABI v2 (`memory`, `ruvi_alloc`, `ruvi_run_json`) alongside ABI v1 |
 
 ## Using `rust-anything` CLI (Optional)
 If porting specific reference utilities from TypeScript/Python into standalone crates, run:
