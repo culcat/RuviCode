@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ruvi_core::{AgentMode, MessageRole, SessionSummary, ThemePalette};
@@ -48,7 +48,7 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, are
         AgentMode::Plan => rgb(palette.warning),
     };
 
-    let header_line = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             " RUVICODE ",
             Style::default()
@@ -76,12 +76,22 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, are
                 .fg(rgb(palette.text))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
-        Span::styled(
-            format!("theme:{}", app.theme_id),
-            Style::default().fg(rgb(palette.muted)),
-        ),
-    ]);
+    ];
+    if let Some(agent_name) = &app.active_agent {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            format!("agent:{agent_name}"),
+            Style::default()
+                .fg(rgb(palette.accent))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    header_spans.push(Span::raw("  "));
+    header_spans.push(Span::styled(
+        format!("theme:{}", app.theme_id),
+        Style::default().fg(rgb(palette.muted)),
+    ));
+    let header_line = Line::from(header_spans);
 
     let widget = Paragraph::new(header_line).block(
         Block::default()
@@ -296,6 +306,30 @@ fn push_sidebar_list(
     lines.push(Line::from(""));
 }
 
+fn push_sidebar_statuses(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    entries: impl IntoIterator<Item = (String, &'static str, Color)>,
+    palette: ThemePalette,
+    trailing_blank: bool,
+) {
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(rgb(palette.accent))
+            .add_modifier(Modifier::BOLD),
+    )));
+    for (name, label, color) in entries {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  • {name:<11} ")),
+            Span::styled(label, Style::default().fg(color)),
+        ]));
+    }
+    if trailing_blank {
+        lines.push(Line::from(""));
+    }
+}
+
 fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, area: Rect) {
     let ctx = app.engine.context();
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -320,6 +354,21 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, ar
     );
     push_sidebar_list(
         &mut lines,
+        format!("Agents ({})", ctx.agents.len()),
+        ctx.agents
+            .iter()
+            .take(4)
+            .map(|a| {
+                let active = app.active_agent.as_deref() == Some(a.name.as_str());
+                let marker = if active { "*" } else { "" };
+                format!("{marker}{} [{}]", a.name, a.source_harness)
+            })
+            .collect(),
+        "(none in .agents/agents)",
+        palette,
+    );
+    push_sidebar_list(
+        &mut lines,
         format!("MCP Servers ({})", ctx.mcp_servers.len()),
         ctx.mcp_servers
             .iter()
@@ -330,26 +379,22 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, ar
         palette,
     );
 
-    lines.push(Line::from(Span::styled(
+    push_sidebar_statuses(
+        &mut lines,
         "Local AI Runtimes (/local)",
-        Style::default()
-            .fg(rgb(palette.accent))
-            .add_modifier(Modifier::BOLD),
-    )));
-    for rt in &app.runtime_statuses {
-        let (label, color) = if rt.running {
-            ("UP", rgb(palette.success))
-        } else if rt.installed {
-            ("INST", rgb(palette.warning))
-        } else {
-            ("MISS", rgb(palette.muted))
-        };
-        lines.push(Line::from(vec![
-            Span::raw(format!("  • {:<11} ", rt.display_name)),
-            Span::styled(label, Style::default().fg(color)),
-        ]));
-    }
-    lines.push(Line::from(""));
+        app.runtime_statuses.iter().map(|rt| {
+            let (label, color) = if rt.running {
+                ("UP", rgb(palette.success))
+            } else if rt.installed {
+                ("INST", rgb(palette.warning))
+            } else {
+                ("MISS", rgb(palette.muted))
+            };
+            (rt.display_name.clone(), label, color)
+        }),
+        palette,
+        true,
+    );
 
     push_sidebar_list(
         &mut lines,
@@ -364,23 +409,20 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, ar
         palette,
     );
 
-    lines.push(Line::from(Span::styled(
+    push_sidebar_statuses(
+        &mut lines,
         "Bot Channels (/bots)",
-        Style::default()
-            .fg(rgb(palette.accent))
-            .add_modifier(Modifier::BOLD),
-    )));
-    for ch in app.registry.channels() {
-        let (label, color) = if ch.is_configured() {
-            ("READY", rgb(palette.success))
-        } else {
-            ("UNSET", rgb(palette.muted))
-        };
-        lines.push(Line::from(vec![
-            Span::raw(format!("  • {:<11} ", ch.display_name())),
-            Span::styled(label, Style::default().fg(color)),
-        ]));
-    }
+        app.registry.channels().into_iter().map(|ch| {
+            let (label, color) = if ch.is_configured() {
+                ("READY", rgb(palette.success))
+            } else {
+                ("UNSET", rgb(palette.muted))
+            };
+            (ch.display_name().to_string(), label, color)
+        }),
+        palette,
+        false,
+    );
 
     let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
@@ -444,6 +486,9 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, palette: ThemePalette, root
         }
         ActiveModal::SessionSelector { sessions, selected } => {
             render_session_selector(frame, sessions, *selected, palette, root);
+        }
+        ActiveModal::AgentSelector { selected } => {
+            render_agent_selector(frame, app, *selected, palette, root);
         }
         ActiveModal::Info { title, lines } => render_info_modal(frame, title, lines, palette, root),
     }
@@ -636,6 +681,63 @@ fn render_session_selector(
         Block::default()
             .borders(Borders::ALL)
             .title(" Saved Sessions (Enter to resume, Esc to close) ")
+            .border_style(Style::default().fg(rgb(palette.accent)))
+            .style(Style::default().bg(rgb(palette.surface))),
+    );
+    frame.render_widget(list, area);
+}
+
+fn render_agent_selector(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    selected: usize,
+    palette: ThemePalette,
+    root: Rect,
+) {
+    let area = centered_rect(76, 62, root);
+    frame.render_widget(Clear, area);
+    let agents = &app.engine.context().agents;
+    let items: Vec<ListItem<'_>> = if agents.is_empty() {
+        vec![
+            ListItem::new(
+                " No agent profiles found in .agents/agents, .claude/agents, .opencode/agent, or opencode.json",
+            )
+            .style(Style::default().fg(rgb(palette.muted))),
+        ]
+    } else {
+        agents
+            .iter()
+            .enumerate()
+            .map(|(idx, agent)| {
+                let active = app.active_agent.as_deref() == Some(agent.name.as_str());
+                let marker = if active { "*" } else { " " };
+                let mode_badge = agent.mode.map_or("-", AgentMode::badge);
+                let preferred_model = agent.model.as_deref().unwrap_or("default");
+                let style = if idx == selected {
+                    Style::default()
+                        .fg(rgb(palette.background))
+                        .bg(rgb(palette.accent))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgb(palette.text))
+                };
+                let desc = if agent.description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", agent.description)
+                };
+                ListItem::new(format!(
+                    " {marker} {} [{}] ({mode_badge}, {preferred_model}){desc}",
+                    agent.name, agent.source_harness
+                ))
+                .style(style)
+            })
+            .collect()
+    };
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Select Agent Profile (Enter to activate, Esc to close) ")
             .border_style(Style::default().fg(rgb(palette.accent)))
             .style(Style::default().bg(rgb(palette.surface))),
     );

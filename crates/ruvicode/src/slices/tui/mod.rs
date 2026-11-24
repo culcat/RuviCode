@@ -20,6 +20,7 @@ use crate::slices::chat::{
 /// Built-in slash commands exposed in the Command Palette (`Ctrl+P` / `/help`).
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/models", "Select active LLM provider and model"),
+    ("/agents", "Switch active cross-harness agent profile"),
     ("/sessions", "List and resume saved chat sessions"),
     (
         "/local",
@@ -71,6 +72,11 @@ pub enum ActiveModal {
         /// Highlighted session index.
         selected: usize,
     },
+    /// Interactive picker for cross-harness agent profiles.
+    AgentSelector {
+        /// Highlighted agent profile index.
+        selected: usize,
+    },
     /// Read-only inspection modal for skills, plugins, or bots.
     Info {
         /// Modal title.
@@ -110,6 +116,8 @@ pub struct TuiApp {
     pub runtime_statuses: Vec<RuntimeStatus>,
     /// Currently active [`ruvi_core::UiTheme`] ID.
     pub theme_id: String,
+    /// Currently active cross-harness agent profile name.
+    pub active_agent: Option<String>,
     /// Prompt input buffer.
     pub input: String,
     /// Vertical scroll line offset for chat timeline.
@@ -152,6 +160,7 @@ impl TuiApp {
             bus,
             runtime_statuses,
             theme_id: "opencode-dark".to_string(),
+            active_agent: None,
             input: String::new(),
             scroll_offset: 0,
             show_sidebar: true,
@@ -403,6 +412,7 @@ impl TuiApp {
         match cmd {
             "/help" => self.modal = ActiveModal::CommandPalette { selected: 0 },
             "/models" => self.spawn_model_discovery(),
+            "/agents" => self.modal = ActiveModal::AgentSelector { selected: 0 },
             "/sessions" => self.spawn_session_list(),
             "/local" => {
                 self.modal = ActiveModal::LocalInstaller {
@@ -710,8 +720,59 @@ impl TuiApp {
                 }
                 _ => {}
             },
+            ActiveModal::AgentSelector { selected } => match key.code {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    if *selected + 1 < self.engine.context().agents.len() {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let idx = *selected;
+                    self.modal = ActiveModal::None;
+                    self.activate_agent_profile(idx);
+                }
+                _ => {}
+            },
             ActiveModal::Info { .. } | ActiveModal::None => {}
         }
+    }
+
+    fn activate_agent_profile(&mut self, index: usize) {
+        let Some(profile) = self.engine.context().agents.get(index).cloned() else {
+            return;
+        };
+        self.active_agent = Some(profile.name.clone());
+        if let Some(mode) = profile.mode {
+            self.engine.set_mode(mode);
+        }
+        if let Some(raw_model) = profile
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            if let Some((provider, model)) = raw_model
+                .split_once('/')
+                .filter(|(p, m)| !p.is_empty() && !m.is_empty())
+            {
+                self.engine.select_model(provider, model);
+            } else {
+                let current_provider = self.engine.provider_id().to_string();
+                self.engine.select_model(current_provider, raw_model);
+            }
+        }
+        let mut note = format!("Activated agent profile `{}`", profile.name);
+        if !profile.description.is_empty() {
+            note.push_str(" — ");
+            note.push_str(&profile.description);
+        }
+        if !profile.system_prompt.is_empty() {
+            note.push_str("\n\n");
+            note.push_str(&profile.system_prompt);
+        }
+        self.engine.push_system_note(note);
+        self.status_line = format!("Switched to agent `{}`", profile.name);
     }
 
     fn handle_bg_result(&mut self, msg: BgResult) {
@@ -969,5 +1030,97 @@ mod tests {
 
         app.execute_slash_command("/mic abc");
         assert!(app.status_line.contains("Invalid duration"));
+    }
+
+    #[test]
+    fn renders_agent_selector_modal_and_activates_profile() {
+        use ruvi_core::{AgentMode, AgentProfile};
+
+        assert!(COMMANDS.iter().any(|(cmd, _)| *cmd == "/agents"));
+
+        let mut registry = ExtensionRegistry::new();
+        register_default_providers(&mut registry);
+        theme::register_default_themes(&mut registry);
+        let registry = Arc::new(registry);
+        let bus = EventBus::default();
+        let context = HarnessContext {
+            agents: vec![
+                AgentProfile {
+                    name: "builder".to_string(),
+                    description: "Fast implementation agent".to_string(),
+                    system_prompt: "Write concise Rust code.".to_string(),
+                    model: Some("local-coder".to_string()),
+                    mode: Some(AgentMode::Build),
+                    source_harness: "opencode".to_string(),
+                },
+                AgentProfile {
+                    name: "reviewer".to_string(),
+                    description: "Strict code reviewer".to_string(),
+                    system_prompt: "Inspect diffs for edge cases.".to_string(),
+                    model: Some("openai/gpt-4o".to_string()),
+                    mode: Some(AgentMode::Plan),
+                    source_harness: "agents".to_string(),
+                },
+            ],
+            ..HarnessContext::default()
+        };
+        let engine = ChatEngine::new(
+            Arc::clone(&registry),
+            bus.clone(),
+            context,
+            "ruvi-demo",
+            "ruvi-demo-v1",
+        );
+        let mut app = TuiApp::new(
+            "/workspace/RuviCode".to_string(),
+            "dev".to_string(),
+            engine,
+            registry,
+            bus,
+            Vec::new(),
+        );
+
+        app.execute_slash_command("/agents");
+        assert_eq!(app.modal, ActiveModal::AgentSelector { selected: 0 });
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).expect("test terminal must init");
+        terminal
+            .draw(|frame| view::render(frame, &app))
+            .expect("draw must succeed");
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Select Agent Profile"));
+        assert!(rendered.contains("reviewer [agents]"));
+        assert!(rendered.contains("Strict code reviewer"));
+
+        // Move down to `reviewer` and activate with Enter.
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.modal, ActiveModal::None);
+        assert_eq!(app.active_agent.as_deref(), Some("reviewer"));
+        assert_eq!(app.engine.mode(), AgentMode::Plan);
+        assert_eq!(app.engine.provider_id(), "openai");
+        assert_eq!(app.engine.model(), "gpt-4o");
+        assert!(app.engine.messages().iter().any(|m| {
+            m.role == MessageRole::System
+                && m.content.contains("Strict code reviewer")
+                && m.content.contains("Inspect diffs for edge cases.")
+        }));
+
+        terminal
+            .draw(|frame| view::render(frame, &app))
+            .expect("draw after selection must succeed");
+        let after = buffer_text(&terminal);
+        assert!(after.contains("agent:reviewer"));
+        assert!(after.contains("Agents (2)"));
+        assert!(after.contains("*reviewer [agents]"));
+
+        // Selecting a profile with a model without `provider/` keeps the active provider.
+        app.execute_slash_command("/agents");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.active_agent.as_deref(), Some("builder"));
+        assert_eq!(app.engine.mode(), AgentMode::Build);
+        assert_eq!(app.engine.provider_id(), "openai");
+        assert_eq!(app.engine.model(), "local-coder");
     }
 }
