@@ -269,6 +269,15 @@ impl TuiApp {
         let tx = self.bg_tx.clone();
         self.status_line = format!("Recording microphone for {seconds}s...");
         tokio::spawn(async move {
+            let Some(transcriber) = registry.transcribers().into_iter().next() else {
+                let _ = tx.send(BgResult::VoiceTranscribed(Err(
+                    ruvi_core::CoreError::NotFound {
+                        kind: "transcriber",
+                        id: "whisper-cpp".to_string(),
+                    },
+                )));
+                return;
+            };
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos());
@@ -276,16 +285,7 @@ impl TuiApp {
                 .join(format!("ruvicode-mic-{}-{nanos}.wav", std::process::id()));
             let recorder = crate::slices::voice::MicrophoneRecorder;
             let result = match recorder.record_wav(&temp_path, seconds).await {
-                Ok(()) => {
-                    let transcriber = registry.transcribers().into_iter().next();
-                    match transcriber {
-                        Some(t) => t.transcribe_file(&temp_path).await,
-                        None => Err(ruvi_core::CoreError::NotFound {
-                            kind: "transcriber",
-                            id: "whisper-cpp".to_string(),
-                        }),
-                    }
-                }
+                Ok(()) => transcriber.transcribe_file(&temp_path).await,
                 Err(err) => Err(err),
             };
             let _ = tokio::fs::remove_file(&temp_path).await;
