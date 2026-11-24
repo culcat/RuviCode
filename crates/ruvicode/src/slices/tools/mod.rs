@@ -62,7 +62,7 @@ fn resolve_writable_workspace_path(workspace_root: &Path, raw: &str) -> CoreResu
     let candidate = Path::new(raw);
     if matches!(
         candidate.components().next_back(),
-        Some(Component::CurDir) | None
+        Some(Component::CurDir | Component::ParentDir) | None
     ) {
         return Err(CoreError::Execution {
             component: "workspace_path".to_string(),
@@ -810,6 +810,7 @@ mod tests {
         for bad in [
             "../escape.txt",
             "nested/../../escape.txt",
+            "nested/sub/..",
             "/etc/passwd",
             "",
         ] {

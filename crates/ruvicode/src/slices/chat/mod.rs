@@ -249,7 +249,12 @@ impl ChatEngine {
             }
         }
 
-        let tools = self.registry.tools();
+        let tools: Vec<_> = self
+            .registry
+            .tools()
+            .into_iter()
+            .filter(|tool| self.mode != AgentMode::Plan || tool.is_read_only())
+            .collect();
         if !tools.is_empty() {
             prompt.push_str("\nRegistered tools:\n");
             for tool in tools {
@@ -519,6 +524,10 @@ mod tests {
     async fn chat_engine_toggles_mode_and_completes_via_registry() {
         let mut registry = ExtensionRegistry::new();
         registry.register_provider(Arc::new(FakeProvider));
+        registry.register_tool(Arc::new(UpperTool));
+        registry.register_tool(Arc::new(MutatingSpyTool {
+            executed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }));
 
         let context = HarnessContext {
             skills: vec![SkillDescriptor {
@@ -538,6 +547,10 @@ mod tests {
             "fake-model",
         );
 
+        let build_prompt = engine.build_system_prompt();
+        assert!(build_prompt.contains("- upper:"));
+        assert!(build_prompt.contains("- mutate:"));
+
         assert_eq!(engine.toggle_mode(), AgentMode::Plan);
         let reply = engine
             .send_user_message("hello ruvi")
@@ -546,7 +559,10 @@ mod tests {
 
         assert_eq!(reply.content, "[PLAN] echo: hello ruvi");
         assert_eq!(engine.messages().len(), 2);
-        assert!(engine.build_system_prompt().contains("ponytail"));
+        let plan_prompt = engine.build_system_prompt();
+        assert!(plan_prompt.contains("ponytail"));
+        assert!(plan_prompt.contains("- upper:"));
+        assert!(!plan_prompt.contains("- mutate:"));
     }
 
     #[tokio::test]
