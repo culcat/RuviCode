@@ -76,15 +76,17 @@ impl From<CliMode> for AgentMode {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    if cli.command.is_some() || std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
+
     let workspace = match cli.workspace {
         Some(path) => path,
         None => std::env::current_dir()?,
@@ -104,6 +106,7 @@ async fn main() -> Result<()> {
                 provider_id,
                 model,
             );
+            let bot_system_prompt = engine.build_system_prompt();
             if let Some(session_str) = cli.resume
                 && let Some(store) = registry.session_store()
             {
@@ -114,7 +117,7 @@ async fn main() -> Result<()> {
             if let Err(err) = start_configured_bots(
                 Arc::clone(&registry),
                 bus.clone(),
-                engine.build_system_prompt(),
+                bot_system_prompt,
                 engine.provider_id().to_string(),
                 engine.model().to_string(),
             )
@@ -212,9 +215,10 @@ async fn resolve_provider_and_model(
     model: Option<String>,
 ) -> Result<(String, String)> {
     let (default_provider, default_model) = detect_initial_provider_and_model(registry).await;
-    let chosen_provider = provider.unwrap_or(default_provider);
+    let chosen_provider = provider.unwrap_or_else(|| default_provider.clone());
     let chosen_model = match model {
         Some(m) => m,
+        None if chosen_provider == default_provider => default_model,
         None if chosen_provider == "ruvi-demo" => "ruvi-demo-v1".to_string(),
         None => {
             let prov = registry.provider(&chosen_provider)?;
@@ -222,7 +226,9 @@ async fn resolve_provider_and_model(
                 .await?
                 .into_iter()
                 .next()
-                .unwrap_or(default_model)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("provider `{chosen_provider}` returned no available models")
+                })?
         }
     };
     Ok((chosen_provider, chosen_model))
@@ -314,4 +320,69 @@ fn detect_git_branch(workspace: &Path) -> String {
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .filter(|branch| !branch.is_empty())
         .unwrap_or_else(|| "no-git".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use ruvi_core::{
+        CompletionRequest, CompletionResponse, CoreResult, ExtensionRegistry, LlmProvider,
+    };
+
+    use super::*;
+
+    struct StubProvider {
+        id: &'static str,
+        models: Vec<String>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StubProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Stub"
+        }
+
+        async fn list_models(&self) -> CoreResult<Vec<String>> {
+            Ok(self.models.clone())
+        }
+
+        async fn complete(&self, _request: CompletionRequest) -> CoreResult<CompletionResponse> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_and_model_preserves_defaults_and_errors_on_empty_models() {
+        let mut registry = ExtensionRegistry::new();
+        registry.register_provider(Arc::new(StubProvider {
+            id: "custom",
+            models: vec!["custom-model-1".to_string()],
+        }));
+        registry.register_provider(Arc::new(StubProvider {
+            id: "empty",
+            models: Vec::new(),
+        }));
+
+        let (prov, model) = resolve_provider_and_model(&registry, Some("custom".into()), None)
+            .await
+            .expect("custom provider with model should resolve");
+        assert_eq!(prov, "custom");
+        assert_eq!(model, "custom-model-1");
+
+        let (explicit_p, explicit_m) =
+            resolve_provider_and_model(&registry, Some("empty".into()), Some("pinned".into()))
+                .await
+                .expect("explicit model override should succeed");
+        assert_eq!(explicit_p, "empty");
+        assert_eq!(explicit_m, "pinned");
+
+        let err = resolve_provider_and_model(&registry, Some("empty".into()), None)
+            .await
+            .expect_err("provider with empty models must fail cleanly");
+        assert!(err.to_string().contains("no available models"));
+    }
 }

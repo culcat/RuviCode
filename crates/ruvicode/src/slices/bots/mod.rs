@@ -14,6 +14,16 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::slices::chat::{AgentLoopConfig, execute_agent_loop};
 
+const MAX_BOT_HISTORY_MESSAGES: usize = 40;
+
+struct BotRouterContext {
+    registry: Arc<ExtensionRegistry>,
+    base_system_prompt: String,
+    provider_id: String,
+    model: String,
+    sessions: HashMap<(String, String), Vec<ChatMessage>>,
+}
+
 /// Spawns a background task routing inbound [`AppEvent::ChannelMessageReceived`] events
 /// through [`execute_agent_loop`] with per-`(channel_id, destination)` conversation history
 /// and delivering replies via the matching [`ChannelGateway`].
@@ -28,7 +38,14 @@ pub fn spawn_bot_session_router(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         drop(bus);
-        let mut sessions: HashMap<(String, String), Vec<ChatMessage>> = HashMap::new();
+        let mut ctx = BotRouterContext {
+            registry,
+            base_system_prompt,
+            provider_id,
+            model,
+            // shortcut: single-task loop processes rooms sequentially; spawn per-key tasks if multi-tenant concurrency is needed.
+            sessions: HashMap::new(),
+        };
 
         loop {
             let event = match rx.recv().await {
@@ -40,89 +57,116 @@ pub fn spawn_bot_session_router(
                 Err(RecvError::Closed) => break,
             };
 
-            let AppEvent::ChannelMessageReceived {
+            if let AppEvent::ChannelMessageReceived {
                 channel_id,
                 destination,
                 sender,
                 text,
             } = event
-            else {
-                continue;
-            };
-
-            if text.trim().is_empty() {
-                continue;
-            }
-
-            let user_content = if sender.trim().is_empty() {
-                text
-            } else {
-                format!("[{sender}] {text}")
-            };
-            let user_msg = ChatMessage::new(MessageRole::User, user_content);
-
-            let history = sessions
-                .entry((channel_id.clone(), destination.clone()))
-                .or_default();
-
-            let mut initial_messages = Vec::with_capacity(history.len() + 2);
-            initial_messages.push(ChatMessage::new(
-                MessageRole::System,
-                base_system_prompt.clone(),
-            ));
-            initial_messages.extend(history.iter().cloned());
-            initial_messages.push(user_msg.clone());
-
-            let outcome = match execute_agent_loop(
-                &registry,
-                AgentLoopConfig {
-                    provider_id: provider_id.clone(),
-                    model: model.clone(),
-                    mode: AgentMode::Build,
-                    initial_messages,
-                },
-                None,
-            )
-            .await
             {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    tracing::warn!(
-                        channel_id = %channel_id,
-                        destination = %destination,
-                        "bot agent loop failed: {err}"
-                    );
-                    continue;
-                }
-            };
-
-            history.push(user_msg);
-            history.extend(outcome.generated_messages);
-
-            let Some(gateway) = registry
-                .channels()
-                .into_iter()
-                .find(|ch| ch.id() == channel_id)
-            else {
-                tracing::warn!(
-                    channel_id = %channel_id,
-                    "no registered channel gateway matched inbound message"
-                );
-                continue;
-            };
-
-            if let Err(err) = gateway
-                .send_reply(&destination, &outcome.response.content)
-                .await
-            {
-                tracing::warn!(
-                    channel_id = %channel_id,
-                    destination = %destination,
-                    "bot send_reply failed: {err}"
-                );
+                handle_inbound_bot_message(&mut ctx, channel_id, destination, sender, text).await;
             }
         }
     })
+}
+
+async fn handle_inbound_bot_message(
+    ctx: &mut BotRouterContext,
+    channel_id: String,
+    destination: String,
+    sender: String,
+    text: String,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let user_content = if sender.trim().is_empty() {
+        text
+    } else {
+        format!("[{sender}] {text}")
+    };
+    let user_msg = ChatMessage::new(MessageRole::User, user_content);
+
+    let history = ctx
+        .sessions
+        .entry((channel_id.clone(), destination.clone()))
+        .or_default();
+
+    let mut initial_messages = Vec::with_capacity(history.len() + 2);
+    initial_messages.push(ChatMessage::new(
+        MessageRole::System,
+        ctx.base_system_prompt.clone(),
+    ));
+    initial_messages.extend(history.iter().cloned());
+    initial_messages.push(user_msg.clone());
+
+    let outcome = match execute_agent_loop(
+        &ctx.registry,
+        AgentLoopConfig {
+            provider_id: ctx.provider_id.clone(),
+            model: ctx.model.clone(),
+            mode: AgentMode::Build,
+            initial_messages,
+        },
+        None,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                destination = %destination,
+                "bot agent loop failed: {err}"
+            );
+            return;
+        }
+    };
+
+    let reply_text = if outcome.response.content.trim().is_empty() {
+        "(empty completion)".to_string()
+    } else {
+        outcome.response.content
+    };
+
+    history.push(user_msg);
+    history.extend(outcome.generated_messages);
+    if let Some(last) = history.last_mut()
+        && last.role == MessageRole::Assistant
+        && last.content.trim().is_empty()
+    {
+        last.content.clone_from(&reply_text);
+    }
+    if history.len() > MAX_BOT_HISTORY_MESSAGES {
+        let excess = history.len() - MAX_BOT_HISTORY_MESSAGES;
+        let cut = history[excess..]
+            .iter()
+            .position(|m| m.role == MessageRole::User)
+            .map_or(history.len(), |offset| excess + offset);
+        history.drain(..cut);
+    }
+
+    let Some(gateway) = ctx
+        .registry
+        .channels()
+        .into_iter()
+        .find(|ch| ch.id() == channel_id)
+    else {
+        tracing::warn!(
+            channel_id = %channel_id,
+            "no registered channel gateway matched inbound message"
+        );
+        return;
+    };
+
+    if let Err(err) = gateway.send_reply(&destination, &reply_text).await {
+        tracing::warn!(
+            channel_id = %channel_id,
+            destination = %destination,
+            "bot send_reply failed: {err}"
+        );
+    }
 }
 
 /// Starts every configured [`ChannelGateway`] in `registry` and spawns the session router
@@ -479,6 +523,7 @@ mod tests {
     struct MockChannelGateway {
         id: &'static str,
         configured: bool,
+        fail_start: bool,
         started: AtomicBool,
         sent: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
     }
@@ -488,6 +533,7 @@ mod tests {
             Self {
                 id,
                 configured,
+                fail_start: false,
                 started: AtomicBool::new(false),
                 sent: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             }
@@ -509,6 +555,9 @@ mod tests {
         }
 
         async fn start(&self, _bus: EventBus) -> CoreResult<()> {
+            if self.fail_start {
+                return Err(CoreError::Config("mock start failure".to_string()));
+            }
             self.started.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -556,9 +605,22 @@ mod tests {
                 .rfind(|m| m.role == MessageRole::User)
                 .map_or("", |m| m.content.as_str());
 
+            if last_user.contains("FAIL_TURN") {
+                return Err(CoreError::Provider {
+                    provider: "mock-llm".to_string(),
+                    message: "simulated failure".to_string(),
+                });
+            }
+
+            let content = if last_user.contains("EMPTY_REPLY") {
+                String::new()
+            } else {
+                format!("sys={sys} turns={user_turns} echo={last_user}")
+            };
+
             Ok(CompletionResponse {
                 model: request.model,
-                content: format!("sys={sys} turns={user_turns} echo={last_user}"),
+                content,
                 tool_calls: Vec::new(),
             })
         }
@@ -705,5 +767,124 @@ mod tests {
         .await
         .expect("should return Ok(empty)");
         assert_eq!(started, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn bot_session_router_skips_whitespace_handles_errors_and_empty_replies() {
+        let gateway = Arc::new(MockChannelGateway::new("mock-tg", true));
+        let sent = Arc::clone(&gateway.sent);
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register_provider(Arc::new(MockLlmProvider));
+        registry.register_channel(gateway);
+        let bus = EventBus::default();
+
+        let router = spawn_bot_session_router(
+            Arc::new(registry),
+            bus.clone(),
+            "sys".to_string(),
+            "mock-llm".to_string(),
+            "mock-v1".to_string(),
+        );
+
+        let _ = bus.publish(AppEvent::ChannelMessageReceived {
+            channel_id: "mock-tg".to_string(),
+            destination: "chat-err".to_string(),
+            sender: "alice".to_string(),
+            text: "   \n ".to_string(),
+        });
+        let _ = bus.publish(AppEvent::ChannelMessageReceived {
+            channel_id: "mock-tg".to_string(),
+            destination: "chat-err".to_string(),
+            sender: "alice".to_string(),
+            text: "FAIL_TURN".to_string(),
+        });
+        let _ = bus.publish(AppEvent::ChannelMessageReceived {
+            channel_id: "mock-tg".to_string(),
+            destination: "chat-err".to_string(),
+            sender: "alice".to_string(),
+            text: "recovered".to_string(),
+        });
+        let _ = bus.publish(AppEvent::ChannelMessageReceived {
+            channel_id: "mock-tg".to_string(),
+            destination: "chat-err".to_string(),
+            sender: "alice".to_string(),
+            text: "EMPTY_REPLY".to_string(),
+        });
+
+        let replies = wait_for_sent_count(&sent, 2).await;
+        assert!(replies[0].1.contains("turns=1"));
+        assert!(replies[0].1.contains("recovered"));
+        assert_eq!(replies[1].1, "(empty completion)");
+
+        router.abort();
+    }
+
+    #[tokio::test]
+    async fn bot_session_router_caps_history_at_sliding_window() {
+        let gateway = Arc::new(MockChannelGateway::new("mock-tg", true));
+        let sent = Arc::clone(&gateway.sent);
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register_provider(Arc::new(MockLlmProvider));
+        registry.register_channel(gateway);
+        let bus = EventBus::default();
+
+        let router = spawn_bot_session_router(
+            Arc::new(registry),
+            bus.clone(),
+            "sys".to_string(),
+            "mock-llm".to_string(),
+            "mock-v1".to_string(),
+        );
+
+        let total_turns = 25usize;
+        for idx in 0..total_turns {
+            let _ = bus.publish(AppEvent::ChannelMessageReceived {
+                channel_id: "mock-tg".to_string(),
+                destination: "chat-cap".to_string(),
+                sender: "alice".to_string(),
+                text: format!("msg-{idx}"),
+            });
+        }
+
+        let replies = wait_for_sent_count(&sent, total_turns).await;
+        let last_reply = &replies[total_turns - 1].1;
+        assert!(last_reply.contains("turns=21"));
+
+        router.abort();
+    }
+
+    #[tokio::test]
+    async fn start_configured_bots_aborts_router_when_gateway_start_fails() {
+        let mut failing = MockChannelGateway::new("mock-tg", true);
+        failing.fail_start = true;
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register_provider(Arc::new(MockLlmProvider));
+        registry.register_channel(Arc::new(failing));
+        let bus = EventBus::default();
+
+        let err = start_configured_bots(
+            Arc::new(registry),
+            bus.clone(),
+            "sys".to_string(),
+            "mock-llm".to_string(),
+            "mock-v1".to_string(),
+        )
+        .await
+        .expect_err("failing gateway start must return Err");
+        assert!(matches!(err, CoreError::Config(_)));
+
+        tokio::task::yield_now().await;
+        assert_eq!(
+            bus.publish(AppEvent::ChannelMessageReceived {
+                channel_id: "mock-tg".to_string(),
+                destination: "room".to_string(),
+                sender: "u".to_string(),
+                text: "after-abort".to_string(),
+            }),
+            0
+        );
     }
 }
