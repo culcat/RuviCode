@@ -249,7 +249,12 @@ impl ChatEngine {
             }
         }
 
-        let tools = self.registry.tools();
+        let tools: Vec<_> = self
+            .registry
+            .tools()
+            .into_iter()
+            .filter(|tool| self.mode != AgentMode::Plan || tool.is_read_only())
+            .collect();
         if !tools.is_empty() {
             prompt.push_str("\nRegistered tools:\n");
             for tool in tools {
@@ -314,6 +319,7 @@ pub async fn execute_agent_loop(
     let tools: Vec<ToolDefinition> = registry
         .tools()
         .into_iter()
+        .filter(|tool| config.mode != AgentMode::Plan || tool.is_read_only())
         .map(|tool| ToolDefinition {
             name: tool.name().to_string(),
             description: tool.description().to_string(),
@@ -374,6 +380,9 @@ pub async fn execute_agent_loop(
             }
 
             let output_json = match registry.tool(&call.name) {
+                Ok(tool) if config.mode == AgentMode::Plan && !tool.is_read_only() => {
+                    json!({ "error": format!("tool `{}` is disabled in PLAN (read-only) mode", call.name) })
+                }
                 Ok(tool) => match tool.execute(call.arguments.clone()).await {
                     Ok(val) => val,
                     Err(err) => json!({ "error": err.to_string() }),
@@ -515,6 +524,10 @@ mod tests {
     async fn chat_engine_toggles_mode_and_completes_via_registry() {
         let mut registry = ExtensionRegistry::new();
         registry.register_provider(Arc::new(FakeProvider));
+        registry.register_tool(Arc::new(UpperTool));
+        registry.register_tool(Arc::new(MutatingSpyTool {
+            executed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }));
 
         let context = HarnessContext {
             skills: vec![SkillDescriptor {
@@ -534,6 +547,10 @@ mod tests {
             "fake-model",
         );
 
+        let build_prompt = engine.build_system_prompt();
+        assert!(build_prompt.contains("- upper:"));
+        assert!(build_prompt.contains("- mutate:"));
+
         assert_eq!(engine.toggle_mode(), AgentMode::Plan);
         let reply = engine
             .send_user_message("hello ruvi")
@@ -542,7 +559,10 @@ mod tests {
 
         assert_eq!(reply.content, "[PLAN] echo: hello ruvi");
         assert_eq!(engine.messages().len(), 2);
-        assert!(engine.build_system_prompt().contains("ponytail"));
+        let plan_prompt = engine.build_system_prompt();
+        assert!(plan_prompt.contains("ponytail"));
+        assert!(plan_prompt.contains("- upper:"));
+        assert!(!plan_prompt.contains("- mutate:"));
     }
 
     #[tokio::test]
@@ -570,6 +590,162 @@ mod tests {
                 .messages()
                 .iter()
                 .any(|m| m.role == MessageRole::Tool)
+        );
+    }
+
+    struct MutatingSpyTool {
+        executed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ruvi_core::AgentTool for MutatingSpyTool {
+        fn name(&self) -> &'static str {
+            "mutate"
+        }
+
+        fn description(&self) -> &'static str {
+            "Mutating test spy tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self) -> bool {
+            false
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> CoreResult<serde_json::Value> {
+            self.executed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({ "mutated": true }))
+        }
+    }
+
+    struct ModeCheckingProvider {
+        seen_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ModeCheckingProvider {
+        fn id(&self) -> &'static str {
+            "mode-check"
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Mode Checking Provider"
+        }
+
+        async fn list_models(&self) -> CoreResult<Vec<String>> {
+            Ok(vec!["mode-1".to_string()])
+        }
+
+        async fn complete(&self, request: CompletionRequest) -> CoreResult<CompletionResponse> {
+            let names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+            self.seen_tools
+                .lock()
+                .expect("seen_tools mutex should not be poisoned")
+                .push(names);
+
+            let tool_outputs: Vec<&str> = request
+                .messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Tool)
+                .map(|m| m.content.as_str())
+                .collect();
+            if !tool_outputs.is_empty() {
+                return Ok(CompletionResponse {
+                    model: request.model,
+                    content: tool_outputs.join(" | "),
+                    tool_calls: Vec::new(),
+                });
+            }
+
+            Ok(CompletionResponse {
+                model: request.model,
+                content: String::new(),
+                tool_calls: vec![
+                    ruvi_core::ToolCall {
+                        id: "call_ro".to_string(),
+                        name: "upper".to_string(),
+                        arguments: json!({ "text": "ok" }),
+                    },
+                    ruvi_core::ToolCall {
+                        id: "call_rw".to_string(),
+                        name: "mutate".to_string(),
+                        arguments: json!({}),
+                    },
+                ],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_agent_loop_filters_and_blocks_mutating_tools_in_plan_mode() {
+        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register_provider(Arc::new(ModeCheckingProvider {
+            seen_tools: Arc::clone(&seen_tools),
+        }));
+        registry.register_tool(Arc::new(UpperTool));
+        registry.register_tool(Arc::new(MutatingSpyTool {
+            executed: Arc::clone(&executed),
+        }));
+
+        let plan_outcome = execute_agent_loop(
+            &registry,
+            AgentLoopConfig {
+                provider_id: "mode-check".to_string(),
+                model: "mode-1".to_string(),
+                mode: AgentMode::Plan,
+                initial_messages: vec![ChatMessage::new(MessageRole::User, "plan only")],
+            },
+            None,
+        )
+        .await
+        .expect("plan loop should complete");
+
+        assert!(
+            !executed.load(std::sync::atomic::Ordering::SeqCst),
+            "mutating tool must never execute in Plan mode"
+        );
+        assert!(plan_outcome.response.content.contains("OK"));
+        assert!(
+            plan_outcome
+                .response
+                .content
+                .contains("tool `mutate` is disabled in PLAN (read-only) mode")
+        );
+        {
+            let recorded = seen_tools
+                .lock()
+                .expect("seen_tools mutex should not be poisoned");
+            assert_eq!(recorded[0], vec!["upper".to_string()]);
+        }
+
+        let build_outcome = execute_agent_loop(
+            &registry,
+            AgentLoopConfig {
+                provider_id: "mode-check".to_string(),
+                model: "mode-1".to_string(),
+                mode: AgentMode::Build,
+                initial_messages: vec![ChatMessage::new(MessageRole::User, "build now")],
+            },
+            None,
+        )
+        .await
+        .expect("build loop should complete");
+
+        assert!(executed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(build_outcome.response.content.contains("\"mutated\":true"));
+        let recorded = seen_tools
+            .lock()
+            .expect("seen_tools mutex should not be poisoned");
+        assert_eq!(
+            recorded.last().expect("build request recorded"),
+            &vec!["mutate".to_string(), "upper".to_string()]
         );
     }
 }
