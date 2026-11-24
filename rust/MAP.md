@@ -6,20 +6,20 @@
 ## Wave 1 — Foundation & Core Kernel (`Feature/core-kernel`)
 | Unit / Reference | RuviCode Target | State | Notes |
 |---|---|---|---|
-| Domain types, `bus.ts`, `agent.ts` | `crates/ruvi-core/src/{domain,bus,error}.rs` | `open` | Pure domain structs, `SessionId`, `AgentMode`, `EventBus` |
-| Extension contracts (`provider.ts`, `tool.ts`, `plugin.ts`) | `crates/ruvi-core/src/{traits,registry}.rs` | `open` | OCP `ExtensionRegistry` & segregated object-safe traits |
+| Domain types, `bus.ts`, `agent.ts` | `crates/ruvi-core/src/{domain,bus,error}.rs` | `done` | Pure domain structs, `SessionId`, `AgentMode`, `EventBus` |
+| Extension contracts (`provider.ts`, `tool.ts`, `plugin.ts`) | `crates/ruvi-core/src/{traits,registry}.rs` | `done` | OCP `ExtensionRegistry` & segregated object-safe traits |
 
 ## Wave 2 — Core Vertical Slices & OpenCode-Style TUI MVP (`Feature/mvp-vertical-slices`)
 | Unit / Reference | RuviCode Target | State | Notes |
 |---|---|---|---|
-| `packages/core/src/session.ts` | `slices/chat/` | `open` | `ChatEngine` with `Build`/`Plan` prompt assembly |
-| `packages/core/src/provider.ts` | `slices/providers/` | `open` | `OpenAiCompatibleProvider` (Ollama, llama.cpp, OpenAI, OpenRouter, Anthropic-compat) + `LocalEchoProvider` |
-| RuviCode native | `slices/local_llm/` | `open` | `OllamaRuntimeManager`, `LlamaCppRuntimeManager` + in-UI installer |
-| `packages/core/src/voice.ts` | `slices/voice/` | `open` | `WhisperCliTranscriber` + install command support |
-| `packages/core/src/{skill,instruction-discovery,mcp}.ts` | `slices/harness_compat/` | `open` | Multi-harness Rules / Skills / MCP loader |
-| `packages/core/src/plugin.ts` | `slices/plugins_wasm/` | `open` | `WasmiPluginHost` loading `.wasm`/`.wat` as `AgentTool` |
-| RuviCode native | `slices/bots/` | `open` | `TelegramBotGateway` & `DiscordBotGateway` |
-| `packages/tui/src/{app,routes,component,theme}` | `slices/tui/` | `open` | OpenCode-style Ratatui TUI + `TestBackend` tests |
+| `packages/core/src/session.ts` | `slices/chat/` | `done` | `ChatEngine` with `Build`/`Plan` prompt assembly |
+| `packages/core/src/provider.ts` | `slices/providers/` | `done` | `OpenAiCompatibleProvider` (Ollama, llama.cpp, OpenAI, OpenRouter, Anthropic-compat) + `LocalEchoProvider` |
+| RuviCode native | `slices/local_llm/` | `done` | `OllamaRuntimeManager`, `LlamaCppRuntimeManager` + in-UI installer |
+| `packages/core/src/voice.ts` | `slices/voice/` | `done` | `WhisperCliTranscriber` + install command support |
+| `packages/core/src/{skill,instruction-discovery,mcp}.ts` | `slices/harness_compat/` | `done` | Multi-harness Rules / Skills / MCP loader |
+| `packages/core/src/plugin.ts` | `slices/plugins_wasm/` | `done` | `WasmiPluginHost` loading `.wasm`/`.wat` as `AgentTool` |
+| RuviCode native | `slices/bots/` | `done` | `TelegramBotGateway` & `DiscordBotGateway` |
+| `packages/tui/src/{app,routes,component,theme}` | `slices/tui/` | `done` | OpenCode-style Ratatui TUI + `TestBackend` tests |
 
 ## Wave 3 — Post-MVP Hardening & Deep Parity (`Future Feature/*` branches)
 | Unit / Reference | Planned Branch | State | Notes |
