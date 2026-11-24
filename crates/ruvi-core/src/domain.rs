@@ -243,6 +243,23 @@ pub struct McpServerConfig {
     pub source_file: String,
 }
 
+/// Cross-harness agent profile discovered from markdown definitions or `opencode.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentProfile {
+    /// Agent profile name.
+    pub name: String,
+    /// Concise profile description.
+    pub description: String,
+    /// System prompt body for this agent profile.
+    pub system_prompt: String,
+    /// Optional preferred model (`provider/model` or `model`).
+    pub model: Option<String>,
+    /// Optional execution mode override (`Build` or `Plan`).
+    pub mode: Option<AgentMode>,
+    /// Harness convention origin (e.g., `agents`, `claude`, `opencode`).
+    pub source_harness: String,
+}
+
 /// Aggregated cross-harness context discovered from the workspace and user config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessContext {
@@ -252,6 +269,9 @@ pub struct HarnessContext {
     pub skills: Vec<SkillDescriptor>,
     /// Discovered MCP server entries.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Discovered cross-harness agent profiles.
+    #[serde(default)]
+    pub agents: Vec<AgentProfile>,
 }
 
 impl HarnessContext {
@@ -260,6 +280,7 @@ impl HarnessContext {
         self.rules.extend(other.rules);
         self.skills.extend(other.skills);
         self.mcp_servers.extend(other.mcp_servers);
+        self.agents.extend(other.agents);
     }
 }
 

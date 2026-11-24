@@ -45,7 +45,7 @@
 ### Wave 4C — Cross-Harness Agent Profiles (`Feature/agent-profiles`)
 | Unit / Reference | RuviCode Target | State | Notes |
 |---|---|---|---|
-| `packages/core/src/agent.ts` & `.agents/agents` | `ruvi-core::domain`, `slices/harness_compat/`, `slices/tui/` | `open` | Discover `.agents/agents/*.md`, `.claude/agents/*.md`, `.opencode/agent/*.md`, `opencode.json` + `/agents` selector |
+| `packages/core/src/agent.ts` & `.agents/agents` | `ruvi-core::domain`, `slices/harness_compat/`, `slices/tui/` | `done` | Discover `.agents/agents/*.md`, `.claude/agents/*.md`, `.opencode/agent/*.md`, `opencode.json` + `/agents` selector |
 
 ## Using `rust-anything` CLI (Optional)
 If porting specific reference utilities from TypeScript/Python into standalone crates, run:
