@@ -26,7 +26,7 @@
 |---|---|---|---|
 | Streaming SSE token chunks & tool-call loop | `Feature/streaming-tool-loop` | `done` | Multi-step agentic tool execution + streaming tokens + built-in `read_file`/`list_dir` tools |
 | SQLite persistent session history (`database/`) | `Feature/session-persistence` | `open` | Persistent sessions, resume, and compaction |
-| Live MCP stdio/SSE client transport (`mcp/`) | `Feature/mcp-client-runtime` | `open` | Spawn and invoke live MCP server tools |
+| Live MCP stdio/SSE client transport (`mcp/`) | `Feature/mcp-client-runtime` | `done` | Live stdio JSON-RPC 2.0 MCP client registering `mcp__<srv>__<tool>` as `AgentTool` |
 | Live audio capture (`cpal`) -> Whisper STT | `Feature/voice-mic-capture` | `open` | Direct microphone push-to-talk in TUI |
 | Extism / Component-Model WASM plugin ABI v2 | `Feature/wasm-plugin-abi-v2` | `open` | Rich host functions & UI panel extensions |
 

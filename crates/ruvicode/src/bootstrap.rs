@@ -6,6 +6,7 @@ use ruvi_core::{CoreResult, ExtensionRegistry, HarnessContext};
 use crate::slices::bots::{DiscordBotGateway, TelegramBotGateway};
 use crate::slices::harness_compat::MultiHarnessContextLoader;
 use crate::slices::local_llm::{LlamaCppRuntimeManager, OllamaRuntimeManager};
+use crate::slices::mcp::register_mcp_tools;
 use crate::slices::plugins_wasm::WasmiPluginHost;
 use crate::slices::providers::register_default_providers;
 use crate::slices::tools::register_builtin_tools;
@@ -41,6 +42,8 @@ pub async fn build_registry(
     for loader in registry.context_loaders() {
         context.merge(loader.load(workspace).await?);
     }
+
+    let _mcp_warnings = register_mcp_tools(&mut registry, &context.mcp_servers).await;
 
     let mut plugin_dirs: Vec<PathBuf> = vec![workspace.join(".ruvi").join("plugins")];
     if let Ok(home) = std::env::var("HOME")

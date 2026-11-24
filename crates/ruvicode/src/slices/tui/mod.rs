@@ -25,6 +25,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Install or inspect Ollama, llama.cpp, and Whisper STT",
     ),
     ("/skills", "Show discovered skills across harnesses"),
+    ("/mcp", "Inspect configured MCP servers and live MCP tools"),
     ("/plugins", "Inspect loaded WASM/native plugins and tools"),
     ("/bots", "Inspect Telegram & Discord bot gateways"),
     ("/voice", "Transcribe an audio file (`/voice <path>`)"),
@@ -329,6 +330,7 @@ impl TuiApp {
                 self.spawn_runtime_refresh();
             }
             "/skills" => self.open_skills_modal(),
+            "/mcp" => self.open_mcp_modal(),
             "/plugins" => self.open_plugins_modal(),
             "/bots" => self.open_bots_modal(),
             "/voice" => self.handle_voice_command(arg),
@@ -362,6 +364,43 @@ impl TuiApp {
         }
         self.modal = ActiveModal::Info {
             title: "Discovered Harness Skills".to_string(),
+            lines,
+        };
+    }
+
+    fn open_mcp_modal(&mut self) {
+        let mut lines: Vec<String> = self
+            .engine
+            .context()
+            .mcp_servers
+            .iter()
+            .map(|s| {
+                format!(
+                    "• {} ({}) -> {} {}",
+                    s.name,
+                    s.source_file,
+                    s.target,
+                    s.args.join(" ")
+                )
+            })
+            .collect();
+        for tool in self
+            .registry
+            .tools()
+            .into_iter()
+            .filter(|t| t.name().starts_with("mcp__"))
+        {
+            lines.push(format!(
+                "Live Tool: {} — {}",
+                tool.name(),
+                tool.description()
+            ));
+        }
+        if lines.is_empty() {
+            lines.push("No MCP servers configured in .mcp.json or opencode.json.".to_string());
+        }
+        self.modal = ActiveModal::Info {
+            title: "MCP Servers & Live Tools".to_string(),
             lines,
         };
     }
