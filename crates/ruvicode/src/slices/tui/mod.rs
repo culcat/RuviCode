@@ -30,6 +30,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/plugins", "Inspect loaded WASM/native plugins and tools"),
     ("/bots", "Inspect Telegram & Discord bot gateways"),
     ("/voice", "Transcribe an audio file (`/voice <path>`)"),
+    (
+        "/mic",
+        "Record microphone audio and transcribe (`/mic [seconds]`)",
+    ),
     ("/theme", "Cycle active UI theme"),
     ("/mode", "Toggle BUILD / PLAN mode"),
     ("/clear", "Clear conversation history"),
@@ -260,6 +264,35 @@ impl TuiApp {
         });
     }
 
+    fn spawn_mic_capture(&mut self, seconds: u8) {
+        let registry = Arc::clone(&self.registry);
+        let tx = self.bg_tx.clone();
+        self.status_line = format!("Recording microphone for {seconds}s...");
+        tokio::spawn(async move {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let temp_path = std::env::temp_dir()
+                .join(format!("ruvicode-mic-{}-{nanos}.wav", std::process::id()));
+            let recorder = crate::slices::voice::MicrophoneRecorder;
+            let result = match recorder.record_wav(&temp_path, seconds).await {
+                Ok(()) => {
+                    let transcriber = registry.transcribers().into_iter().next();
+                    match transcriber {
+                        Some(t) => t.transcribe_file(&temp_path).await,
+                        None => Err(ruvi_core::CoreError::NotFound {
+                            kind: "transcriber",
+                            id: "whisper-cpp".to_string(),
+                        }),
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            let _ = tx.send(BgResult::VoiceTranscribed(result));
+        });
+    }
+
     fn spawn_session_list(&mut self) {
         let registry = Arc::clone(&self.registry);
         let tx = self.bg_tx.clone();
@@ -383,6 +416,7 @@ impl TuiApp {
             "/plugins" => self.open_plugins_modal(),
             "/bots" => self.open_bots_modal(),
             "/voice" => self.handle_voice_command(arg),
+            "/mic" => self.handle_mic_command(arg),
             "/theme" => self.cycle_theme(),
             "/mode" => {
                 let mode = self.engine.toggle_mode();
@@ -517,6 +551,27 @@ impl TuiApp {
         } else {
             self.spawn_voice_transcribe(arg.to_string());
         }
+    }
+
+    fn handle_mic_command(&mut self, arg: &str) {
+        const DEFAULT_MIC_SECONDS: u8 = 5;
+        let seconds = if arg.is_empty() {
+            DEFAULT_MIC_SECONDS
+        } else {
+            match arg.parse::<u8>() {
+                Ok(secs) if secs > 0 => secs,
+                Ok(_) => {
+                    self.status_line = "Recording duration must be at least 1 second".to_string();
+                    return;
+                }
+                Err(_) => {
+                    self.status_line =
+                        format!("Invalid duration `{arg}`. Usage: /mic [seconds] (1-255)");
+                    return;
+                }
+            }
+        };
+        self.spawn_mic_capture(seconds);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -902,5 +957,17 @@ mod tests {
         assert!(rendered.contains("Local AI Runtime Installer"));
         assert!(rendered.contains("Ollama"));
         assert!(rendered.contains("qwen2.5-coder:7b"));
+    }
+
+    #[test]
+    fn mic_command_registered_and_validates_duration() {
+        assert!(COMMANDS.iter().any(|(cmd, _)| *cmd == "/mic"));
+
+        let mut app = build_test_app();
+        app.execute_slash_command("/mic 0");
+        assert!(app.status_line.contains("at least 1 second"));
+
+        app.execute_slash_command("/mic abc");
+        assert!(app.status_line.contains("Invalid duration"));
     }
 }
