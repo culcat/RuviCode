@@ -47,6 +47,23 @@
 |---|---|---|---|
 | `packages/core/src/agent.ts` & `.agents/agents` | `ruvi-core::domain`, `slices/harness_compat/`, `slices/tui/` | `done` | Discover `.agents/agents/*.md`, `.claude/agents/*.md`, `.opencode/agent/*.md`, `opencode.json` + `/agents` selector |
 
+## Wave 5 — Remote MCP HTTP/SSE, Native Anthropic & Gemini Providers, and Custom Slash Commands + `@file` Mentions
+
+### Wave 5A — Streamable HTTP/SSE MCP Client & Fail-Closed Tool Safety (`Feature/mcp-http-and-annotations`)
+| Unit / Reference | RuviCode Target | State | Notes |
+|---|---|---|---|
+| `packages/core/src/mcp/` (HTTP/SSE + annotations) | `slices/mcp/`, `slices/plugins_wasm/` | `open` | `McpHttpClient` (JSON + SSE + `Mcp-Session-Id`), `annotations.readOnlyHint`, and fail-closed `is_read_only()` in `PLAN` mode |
+
+### Wave 5B — Native Anthropic Messages API & Google Gemini Provider (`Feature/native-anthropic-and-gemini`)
+| Unit / Reference | RuviCode Target | State | Notes |
+|---|---|---|---|
+| `packages/core/src/provider.ts` (Anthropic + Gemini) | `slices/providers/` | `open` | Native `AnthropicMessagesProvider` (`/v1/messages` + SSE `text_delta`/`input_json_delta` + `tool_use`/`tool_result`) and `gemini` provider |
+
+### Wave 5C — Cross-Harness Custom Slash Commands & `@file` Mentions (`Feature/custom-commands-and-mentions`)
+| Unit / Reference | RuviCode Target | State | Notes |
+|---|---|---|---|
+| `packages/core/src/command.ts` & `@file` references | `ruvi-core::domain`, `slices/harness_compat/`, `slices/tui/` | `open` | Discover `.agents/commands/*.md`, `.claude/commands/*.md`, `.opencode/command/*.md`, `opencode.json` `"command"` (`$ARGUMENTS`) + `@path` file context expansion |
+
 ## Using `rust-anything` CLI (Optional)
 If porting specific reference utilities from TypeScript/Python into standalone crates, run:
 ```bash
