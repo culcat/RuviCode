@@ -35,7 +35,7 @@
 ### Wave 4A — Mode-Aware Workspace Coding Tools (`Feature/workspace-coding-tools`)
 | Unit / Reference | RuviCode Target | State | Notes |
 |---|---|---|---|
-| `packages/core/src/tool/{grep,write,edit,bash}` | `ruvi-core::traits`, `slices/tools/`, `slices/chat/` | `open` | `grep_search`, `write_file`, `edit_file`, `run_command` + `AgentTool::is_read_only()` enforcement in `PLAN` mode |
+| `packages/core/src/tool/{grep,write,edit,bash}` | `ruvi-core::traits`, `slices/tools/`, `slices/chat/` | `done` | `grep_search`, `write_file`, `edit_file`, `run_command` + `AgentTool::is_read_only()` enforcement in `PLAN` mode |
 
 ### Wave 4B — End-to-End Bot Session Router (`Feature/bot-session-router`)
 | Unit / Reference | RuviCode Target | State | Notes |

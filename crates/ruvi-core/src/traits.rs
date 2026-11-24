@@ -62,6 +62,11 @@ pub trait AgentTool: Send + Sync {
     /// JSON Schema describing accepted tool input arguments.
     fn parameters_schema(&self) -> Value;
 
+    /// Returns `true` if the tool is read-only and permitted in [`crate::AgentMode::Plan`].
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     /// Executes the tool with JSON arguments and returns JSON output.
     ///
     /// # Errors
